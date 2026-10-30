@@ -1,0 +1,3 @@
+[submodule "deps/libxarray"]
+	path = deps/libxarray
+	url = /home/robelin/GitHub/libxarray
