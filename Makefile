@@ -5,17 +5,33 @@ XARRAY_LIB = $(XARRAY)/build/libxarray.a
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall
-CPPFLAGS = -I$(XARRAY)/include -I$(XARRAY)/shim -I$(XARRAY)/lib -D_LGPL_SOURCE
+CPPFLAGS = -Iinclude -I$(XARRAY)/include -I$(XARRAY)/shim -I$(XARRAY)/lib -D_LGPL_SOURCE
 LDLIBS   = $(XARRAY_LIB) -lurcu -lpthread
 
+LIB      = build/libvbd.a
+LIB_OBJS = build/volume.o build/crc32c.o
+
 .PHONY: all test clean $(XARRAY_LIB)
-all: $(XARRAY_LIB)
+all: $(LIB)
 
 $(XARRAY_LIB):
 	$(MAKE) -C $(XARRAY)
 
-test: $(XARRAY_LIB)
+$(LIB): $(LIB_OBJS)
+	ar rcs $@ $^
+
+build/%.o: src/%.c include/*.h | build
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+build/volume_test: tests/volume_test.c $(LIB) $(XARRAY_LIB) | build
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
+
+test: build/volume_test
 	$(MAKE) -C $(XARRAY) test
+	./build/volume_test
+
+build:
+	mkdir -p $@
 
 clean:
 	$(MAKE) -C $(XARRAY) clean

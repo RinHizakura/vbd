@@ -13,17 +13,24 @@ hand-written shims.
 
 Scope: a volume backed by a local base file, no branches, no history yet.
 
-- chunk size 64 KiB, configurable at `create`
+Done:
+
+- chunk size configurable at `create` (power of two)
 - one XArray per volume: chunk index -> value entry holding the log record
-  number; mark 0 = dirty (metadata not yet checkpointed)
-- append-only write log: `[epoch, chunk, len, crc32c][data]`
-- read path: XArray hit -> log record; miss -> base file
+  number
+- append-only log of fixed-size records: `[magic, crc32c, chunk, epoch][data]`
+- read path: XArray hit -> log record; miss -> base file (or zeros)
 - write path: read-modify-write to a full chunk, append, `xa_store`
-- `flush`: fsync log, write checkpoint (sorted `(chunk, record)` array) to a
-  temp file, rename over the old one
+- `flush` = `fdatasync`; reopen replays the log and truncates a torn tail
+- test: random I/O compared byte-for-byte against an in-memory reference,
+  across reopen and a torn record
+
+Remaining:
+
+- checkpoint: sorted `(chunk, record)` array written at `flush`, so reopen
+  does not have to re-read the whole log; only needed once replay is slow
 - CLI: `vbd create | read | write | flush`
-- test: random I/O fuzzer compared byte-for-byte against a flat reference
-  file; survive `kill -9` between any two operations without data loss
+- crash test: `kill -9` between operations instead of a synthetic torn tail
 
 ## P2: lazy fetch
 
