@@ -16,6 +16,8 @@ Scope: a volume backed by a local base file, no branches, no history yet.
 Done:
 
 - chunk size configurable at `create` (power of two)
+- base image bound at `create`: absolute path, size and mtime in the super
+  block; open refuses a base that changed
 - one XArray per volume: chunk index -> value entry holding the log record
   number
 - append-only log of fixed-size records: `[magic, crc32c, chunk, epoch][data]`
@@ -24,12 +26,13 @@ Done:
 - `flush` = `fdatasync`; reopen replays the log and truncates a torn tail
 - test: random I/O compared byte-for-byte against an in-memory reference,
   across reopen and a torn record
+- CLI: `vbd create | info | read | write`; `write` flushes before exit;
+  `tests/cli_test.sh` drives it end to end
 
 Remaining:
 
 - checkpoint: sorted `(chunk, record)` array written at `flush`, so reopen
   does not have to re-read the whole log; only needed once replay is slow
-- CLI: `vbd create | read | write | flush`
 - crash test: `kill -9` between operations instead of a synthetic torn tail
 
 ## P2: lazy fetch

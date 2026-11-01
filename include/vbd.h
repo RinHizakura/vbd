@@ -2,8 +2,10 @@
 /*
  * vbd: a block device as an XArray over an append-only log.
  *
- * A volume is a log file plus an optional read-only base image. Reads of a
- * chunk that was never written fall through to the base image (or zeros).
+ * A volume is a log file plus an optional read-only base image, bound at
+ * create time. Reads of a chunk that was never written fall through to the
+ * base image (or zeros). The base must not change afterwards; open fails
+ * with ESTALE if its size or mtime differs from what create recorded.
  * Every write appends a whole chunk to the log; the XArray maps chunk
  * index -> log record, so the newest record for a chunk always wins.
  *
@@ -19,11 +21,16 @@
 
 struct vbd;
 
-/* Create an empty log for a volume of @size bytes, split in @chunk_size chunks. */
-int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size);
+/*
+ * Create an empty log for a volume of @size bytes, split in @chunk_size
+ * chunks. @base_path may be NULL for an all-zero base; it is stored as an
+ * absolute path.
+ */
+int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
+	       const char *base_path);
 
-/* Open a log; @base_path may be NULL for an all-zero base. Returns NULL and sets errno. */
-struct vbd *vbd_open(const char *log_path, const char *base_path);
+/* Open a log and its base. Returns NULL and sets errno. */
+struct vbd *vbd_open(const char *log_path);
 void vbd_close(struct vbd *v);
 
 uint64_t vbd_size(const struct vbd *v);

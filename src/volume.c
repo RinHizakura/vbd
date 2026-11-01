@@ -2,8 +2,11 @@
 /*
  * Log layout (all little-endian, host order for now):
  *
- *   [super 64 B][record 0][record 1]...
+ *   [super 4 KiB][record 0][record 1]...
  *   record = [header 64 B][chunk_size bytes of data]
+ *
+ * The super block names the base image and remembers its size and mtime, so
+ * a log is never paired with the wrong base by mistake.
  *
  * Records have a fixed size, so record number <-> file offset is arithmetic
  * and the XArray only has to store the record number as a value entry.
@@ -28,12 +31,15 @@
 
 #define VBD_MAGIC	0x31646276u	/* "vbd1" */
 #define HDR_SIZE	64
+#define SUPER_SIZE	4096
 
 struct super {
 	uint32_t magic;
 	uint32_t chunk_size;
 	uint64_t size;
-	uint8_t  pad[HDR_SIZE - 16];
+	uint64_t base_size;	/* st_size of the base at create */
+	int64_t  base_mtime;	/* st_mtim of the base at create, in ns */
+	char     base[SUPER_SIZE - 32];	/* absolute path; empty: all-zero base */
 };
 
 struct rec_hdr {
@@ -57,7 +63,7 @@ struct vbd {
 
 static uint64_t rec_off(const struct vbd *v, uint64_t rec)
 {
-	return HDR_SIZE + rec * v->rec_size;
+	return SUPER_SIZE + rec * v->rec_size;
 }
 
 static int full_pread(int fd, void *buf, size_t len, uint64_t off)
@@ -81,13 +87,36 @@ static int full_pread(int fd, void *buf, size_t len, uint64_t off)
 	return 0;
 }
 
-int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size)
+static int64_t mtime_ns(const struct stat *st)
+{
+	return st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+}
+
+int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
+	       const char *base_path)
 {
 	struct super sb = { .magic = VBD_MAGIC, .chunk_size = chunk_size, .size = size };
 	int fd, ret = 0;
 
 	if (!IS_POWER_OF_2(chunk_size) || !IS_ALIGNED(size, chunk_size))
 		return -EINVAL;
+	if (base_path) {
+		char *abs = realpath(base_path, NULL);
+		struct stat st;
+
+		if (!abs)
+			return -errno;
+		if (strlen(abs) >= sizeof(sb.base)) {
+			free(abs);
+			return -ENAMETOOLONG;
+		}
+		strcpy(sb.base, abs);
+		free(abs);
+		if (stat(sb.base, &st))
+			return -errno;
+		sb.base_size = st.st_size;
+		sb.base_mtime = mtime_ns(&st);
+	}
 	fd = open(log_path, O_WRONLY | O_CREAT | O_EXCL, 0644);
 	if (fd < 0)
 		return -errno;
@@ -132,7 +161,22 @@ out:
 	return ret;
 }
 
-struct vbd *vbd_open(const char *log_path, const char *base_path)
+/* Open the base named in the super block and check it is unchanged. */
+static int open_base(struct vbd *v, const struct super *sb)
+{
+	struct stat st;
+
+	if (!sb->base[0])
+		return 0;
+	v->base_fd = open(sb->base, O_RDONLY);
+	if (v->base_fd < 0 || fstat(v->base_fd, &st))
+		return -errno;
+	if ((uint64_t)st.st_size != sb->base_size || mtime_ns(&st) != sb->base_mtime)
+		return -ESTALE;
+	return 0;
+}
+
+struct vbd *vbd_open(const char *log_path)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
 	struct super sb;
@@ -148,17 +192,17 @@ struct vbd *vbd_open(const char *log_path, const char *base_path)
 		errno = -err;
 		goto fail;
 	}
-	if (sb.magic != VBD_MAGIC || !sb.chunk_size || !sb.size) {
+	if (sb.magic != VBD_MAGIC || !sb.chunk_size || !sb.size ||
+	    sb.base[sizeof(sb.base) - 1]) {
 		errno = EINVAL;
 		goto fail;
 	}
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
 	v->rec_size = HDR_SIZE + sb.chunk_size;
-	if (base_path) {
-		v->base_fd = open(base_path, O_RDONLY);
-		if (v->base_fd < 0)
-			goto fail;
+	if ((err = open_base(v, &sb))) {
+		errno = -err;
+		goto fail;
 	}
 	xa_init(&v->map);
 	pthread_mutex_init(&v->append_lock, NULL);

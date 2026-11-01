@@ -10,9 +10,13 @@ LDLIBS   = $(XARRAY_LIB) -lurcu -lpthread
 
 LIB      = build/libvbd.a
 LIB_OBJS = build/volume.o build/crc32c.o
+BIN      = build/vbd
 
 .PHONY: all test clean $(XARRAY_LIB)
-all: $(LIB)
+all: $(LIB) $(BIN)
+
+$(BIN): build/main.o $(LIB) $(XARRAY_LIB)
+	$(CC) $(CFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
 $(XARRAY_LIB):
 	$(MAKE) -C $(XARRAY)
@@ -26,9 +30,10 @@ build/%.o: src/%.c include/*.h | build
 build/volume_test: tests/volume_test.c $(LIB) $(XARRAY_LIB) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
-test: build/volume_test
+test: build/volume_test $(BIN)
 	$(MAKE) -C $(XARRAY) test
 	./build/volume_test
+	tests/cli_test.sh $(BIN)
 
 build:
 	mkdir -p $@

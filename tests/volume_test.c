@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -52,10 +53,11 @@ int main(void)
 	snprintf(log_path, sizeof(log_path), "%s.log", base_path);
 	unlink(log_path);
 
-	assert(vbd_create(log_path, SIZE, CHUNK) == 0);
-	assert(vbd_create(log_path, SIZE, CHUNK) == -EEXIST);
-	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 3000) == -EINVAL);
-	v = vbd_open(log_path, base_path);
+	assert(vbd_create(log_path, SIZE, CHUNK, base_path) == 0);
+	assert(vbd_create(log_path, SIZE, CHUNK, base_path) == -EEXIST);
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 3000, NULL) == -EINVAL);
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE, CHUNK, "/nonexistent") == -ENOENT);
+	v = vbd_open(log_path);
 	assert(v && vbd_size(v) == SIZE && vbd_chunk_size(v) == CHUNK);
 	check_all(v);
 
@@ -83,7 +85,7 @@ int main(void)
 		if (i % 1000 == 999) {
 			assert(vbd_flush(v) == 0);
 			vbd_close(v);
-			v = vbd_open(log_path, base_path);
+			v = vbd_open(log_path);
 			assert(v);
 			check_all(v);
 		}
@@ -96,7 +98,7 @@ int main(void)
 	fill_random(buf, 100);
 	assert(write(fd, buf, 100) == 100);
 	close(fd);
-	v = vbd_open(log_path, base_path);
+	v = vbd_open(log_path);
 	assert(v);
 	check_all(v);
 	/* and appending after recovery still works */
@@ -104,10 +106,14 @@ int main(void)
 	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);
 	memcpy(ref, buf, CHUNK);
 	vbd_close(v);
-	v = vbd_open(log_path, base_path);
+	v = vbd_open(log_path);
 	assert(v);
 	check_all(v);
 	vbd_close(v);
+
+	/* a base that changed since create is refused */
+	assert(utimensat(AT_FDCWD, base_path, NULL, 0) == 0);
+	assert(vbd_open(log_path) == NULL && errno == ESTALE);
 
 	unlink(log_path);
 	unlink(base_path);
