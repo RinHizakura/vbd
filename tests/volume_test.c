@@ -111,6 +111,28 @@ int main(void)
 	check_all(v);
 	vbd_close(v);
 
+	/* a damaged super block is refused, and the log is left alone */
+	{
+		struct stat st;
+		uint8_t byte;
+
+		fd = open(log_path, O_RDWR);
+		assert(fd >= 0 && fstat(fd, &st) == 0);
+		assert(pread(fd, &byte, 1, 12) == 1);		/* chunk_size */
+		byte ^= 1;
+		assert(pwrite(fd, &byte, 1, 12) == 1);
+		assert(vbd_open(log_path) == NULL && errno == EINVAL);
+		off_t before = st.st_size;
+		assert(fstat(fd, &st) == 0 && st.st_size == before);
+		byte ^= 1;
+		assert(pwrite(fd, &byte, 1, 12) == 1);
+		close(fd);
+		v = vbd_open(log_path);
+		assert(v);
+		check_all(v);
+		vbd_close(v);
+	}
+
 	/* a base that changed since create is refused */
 	assert(utimensat(AT_FDCWD, base_path, NULL, 0) == 0);
 	assert(vbd_open(log_path) == NULL && errno == ESTALE);

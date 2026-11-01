@@ -17,6 +17,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -30,16 +32,19 @@
 #include "crc32c.h"
 
 #define VBD_MAGIC	0x31646276u	/* "vbd1" */
+#define VBD_VERSION	1
 #define HDR_SIZE	64
 #define SUPER_SIZE	4096
 
 struct super {
+	uint32_t crc;		/* crc32c of everything after this field */
 	uint32_t magic;
+	uint32_t version;
 	uint32_t chunk_size;
 	uint64_t size;
 	uint64_t base_size;	/* st_size of the base at create */
 	int64_t  base_mtime;	/* st_mtim of the base at create, in ns */
-	char     base[SUPER_SIZE - 32];	/* absolute path; empty: all-zero base */
+	char     base[SUPER_SIZE - 40];	/* absolute path; empty: all-zero base */
 };
 
 struct rec_hdr {
@@ -87,6 +92,21 @@ static int full_pread(int fd, void *buf, size_t len, uint64_t off)
 	return 0;
 }
 
+static uint32_t super_crc(const struct super *sb)
+{
+	return crc32c(0, &sb->magic, sizeof(*sb) - offsetof(struct super, magic));
+}
+
+/* Everything create enforces, re-checked on open so a damaged super is refused. */
+static bool super_valid(const struct super *sb)
+{
+	return sb->magic == VBD_MAGIC && sb->version == VBD_VERSION &&
+	       sb->crc == super_crc(sb) &&
+	       IS_POWER_OF_2(sb->chunk_size) && sb->size &&
+	       IS_ALIGNED(sb->size, sb->chunk_size) &&
+	       !sb->base[sizeof(sb->base) - 1];
+}
+
 static int64_t mtime_ns(const struct stat *st)
 {
 	return st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
@@ -95,7 +115,8 @@ static int64_t mtime_ns(const struct stat *st)
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path)
 {
-	struct super sb = { .magic = VBD_MAGIC, .chunk_size = chunk_size, .size = size };
+	struct super sb = { .magic = VBD_MAGIC, .version = VBD_VERSION,
+			    .chunk_size = chunk_size, .size = size };
 	int fd, ret = 0;
 
 	if (!IS_POWER_OF_2(chunk_size) || !IS_ALIGNED(size, chunk_size))
@@ -117,6 +138,7 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 		sb.base_size = st.st_size;
 		sb.base_mtime = mtime_ns(&st);
 	}
+	sb.crc = super_crc(&sb);
 	fd = open(log_path, O_WRONLY | O_CREAT | O_EXCL, 0644);
 	if (fd < 0)
 		return -errno;
@@ -192,8 +214,7 @@ struct vbd *vbd_open(const char *log_path)
 		errno = -err;
 		goto fail;
 	}
-	if (sb.magic != VBD_MAGIC || !sb.chunk_size || !sb.size ||
-	    sb.base[sizeof(sb.base) - 1]) {
+	if (!super_valid(&sb)) {
 		errno = EINVAL;
 		goto fail;
 	}

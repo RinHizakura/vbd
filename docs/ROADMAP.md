@@ -18,6 +18,9 @@ Done:
 - chunk size configurable at `create` (power of two)
 - base image bound at `create`: absolute path, size and mtime in the super
   block; open refuses a base that changed
+- super block carries a version and a crc32c; open re-checks everything
+  create enforced, so a damaged super is refused instead of truncating the
+  log
 - one XArray per volume: chunk index -> value entry holding the log record
   number
 - append-only log of fixed-size records: `[magic, crc32c, chunk, epoch][data]`
