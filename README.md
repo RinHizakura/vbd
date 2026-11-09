@@ -66,6 +66,7 @@ src/main.c           the vbd command
 src/volume.c         chunk map (XArray) over an append-only log
 src/crc32c.c         record checksums
 tests/cli_test.sh    the vbd command end to end
+tests/crash_test.sh  SIGKILL a writer at random, check every chunk is intact
 tests/volume_test.c  random I/O against an in-memory reference, with reopen
                      and torn-tail recovery
 deps/libxarray/      the kernel XArray as a userspace library (submodule)

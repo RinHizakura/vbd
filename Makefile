@@ -34,6 +34,7 @@ test: build/volume_test $(BIN)
 	$(MAKE) -C $(XARRAY) test
 	./build/volume_test
 	tests/cli_test.sh $(BIN)
+	tests/crash_test.sh $(BIN)
 
 build:
 	mkdir -p $@
