@@ -1,12 +1,36 @@
 # vbd
 
-A userspace block-device engine built on the Linux kernel's **XArray**. One
-`chunk -> location` lookup path serves three features:
+**vbd is a block-device server for development and test machines.** It
+serves a disk that is forked from a shared image in O(1), fetches the image
+lazily from wherever it lives, and keeps every write so the disk can be
+reopened at any earlier moment.
 
-1. **Branches**: fork a whole disk in O(1), no data copied
-2. **Lazy fetch**: the base image lives remotely; chunks are fetched on first read
-3. **Time travel**: every write keeps the old version; mount a read-only view
-   of any instant
+It ships in three parts:
+
+| Part | What it is | Status |
+|---|---|---|
+| `vbd` server | exposes a volume as `/dev/ublkbN` through ublk | planned (P4) |
+| `vbd` CLI | creates, inspects, reads and writes volumes from the shell; the front end until the server exists, and the scripting tool afterwards | built |
+| `libvbd` | the engine both of them call; usable on its own, but the API is shaped by the server's needs, not for general embedding | built |
+
+The engine is built on the Linux kernel's **XArray**, compiled unmodified for
+userspace: one `chunk -> location` lookup serves branches, lazy fetch and
+time travel alike.
+
+## Who it is for
+
+Teams that start many short-lived machines from the same large disk image
+and want each one to have its own disk without copying the image:
+
+- a CI runner that forks the golden image per job and discards the branch
+- a developer who mounts an image stored on S3 or an HTTP server and only
+  pays for the chunks that are actually read
+- a tester who reopens a disk at the moment before a test corrupted its
+  database, instead of re-running the test and hoping it reproduces
+
+It is not a general-purpose block device: the base image must never change,
+the write path favours simplicity over throughput, and old data is never
+reclaimed.
 
 ## Build
 
@@ -14,7 +38,7 @@ Requires `liburcu-dev`.
 
 ```sh
 git submodule update --init
-make        # build/libvbd.a (and deps/libxarray)
+make        # build/vbd, build/libvbd.a (and deps/libxarray)
 make test
 make clean
 ```
@@ -27,28 +51,7 @@ the base image; every write appends a whole chunk to the log. The base must
 not change afterwards: opening a volume whose base has a different size or
 mtime than at create time fails.
 
-```c
-#include <vbd.h>
-
-rcu_register_thread();                       /* once per thread */
-
-vbd_create("disk.log", 1 << 30, 64 << 10, "base.img");   /* 1 GiB, 64 KiB chunks */
-struct vbd *v = vbd_open("disk.log");
-
-vbd_write(v, data, len, offset);             /* pwrite semantics: bytes written or -errno */
-vbd_read(v, data, len, offset);              /* pread semantics */
-vbd_flush(v);                                /* fdatasync */
-
-vbd_close(v);
-```
-
-Reopening a log replays it to rebuild the chunk map. A record that was only
-partly written when the process died is detected by its checksum and dropped.
-
-### Command line
-
-`build/vbd` drives a volume from the shell. Sizes and offsets accept `K`,
-`M` and `G` suffixes.
+Sizes and offsets accept `K`, `M` and `G` suffixes.
 
 ```sh
 vbd create disk.log 1G 64K base.img   # new volume, 1 GiB, 64 KiB chunks
@@ -57,21 +60,11 @@ vbd read disk.log 0 4K                # range to stdout
 printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 ```
 
-## Layout
+Reopening a log replays it to rebuild the chunk map. A record that was only
+partly written when the process died is detected by its checksum and dropped.
 
-```
-include/vbd.h        public API
-include/common.h     arithmetic helpers (IS_POWER_OF_2, IS_ALIGNED)
-src/main.c           the vbd command
-src/volume.c         chunk map (XArray) over an append-only log
-src/crc32c.c         record checksums
-tests/cli_test.sh    the vbd command end to end
-tests/crash_test.sh  SIGKILL a writer at random, check every chunk is intact
-tests/volume_test.c  random I/O against an in-memory reference, with reopen
-                     and torn-tail recovery
-deps/libxarray/      the kernel XArray as a userspace library (submodule)
-docs/ROADMAP.md      what is built, in what order, and how each step is checked
-```
+How the engine works is in `docs/ARCHITECTURE.md`; what comes next is in
+`docs/ROADMAP.md`.
 
 ## License
 
