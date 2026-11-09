@@ -4,8 +4,10 @@
  *
  * A volume is a log file plus an optional read-only base image, bound at
  * create time. Reads of a chunk that was never written fall through to the
- * base image (or zeros). The base must not change afterwards; open fails
- * with ESTALE if its size or mtime differs from what create recorded.
+ * base image (or zeros); base chunks are fetched on first use into a cache
+ * file next to the log and served from there afterwards. The base must not
+ * change; open fails with ESTALE if its size or mtime differs from what
+ * create recorded.
  * Every write appends a whole chunk to the log; the XArray maps chunk
  * index -> log record, so the newest record for a chunk always wins.
  *
@@ -35,6 +37,8 @@ void vbd_close(struct vbd *v);
 
 uint64_t vbd_size(const struct vbd *v);
 uint32_t vbd_chunk_size(const struct vbd *v);
+/* Base chunks fetched into the local cache so far (0 without a base). */
+uint64_t vbd_fetched(const struct vbd *v);
 
 /*
  * pread/pwrite semantics: the return value is the number of bytes

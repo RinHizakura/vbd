@@ -47,9 +47,10 @@ make clean
 
 A volume is a log file plus an optional read-only base image, named when the
 volume is created. Reads of a chunk that was never written fall through to
-the base image; every write appends a whole chunk to the log. The base must
-not change afterwards: opening a volume whose base has a different size or
-mtime than at create time fails.
+the base image; a base chunk is fetched on first read into `disk.log.cache`
+and served from there afterwards. Every write appends a whole chunk to the
+log. The base must not change afterwards: opening a volume whose base has a
+different size or mtime than at create time fails.
 
 Sizes and offsets accept `K`, `M` and `G` suffixes.
 

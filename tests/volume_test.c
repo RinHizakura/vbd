@@ -55,7 +55,11 @@ static struct vbd *setup(void)
 
 static void teardown(struct vbd *v)
 {
+	char cache_path[sizeof(log_path) + 8];
+
 	vbd_close(v);		/* NULL is fine */
+	snprintf(cache_path, sizeof(cache_path), "%s.cache", log_path);
+	unlink(cache_path);
 	unlink(log_path);
 	unlink(base_path);
 	strcpy(base_path, "/tmp/vbd-base-XXXXXX");
@@ -213,6 +217,34 @@ static void test_bad_record(void)
 	teardown(v);
 }
 
+/* Base chunks are fetched once, kept across reopen, never refetched. */
+static void test_base_cache(void)
+{
+	struct vbd *v = setup();
+
+	assert(vbd_fetched(v) == 0);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK);		/* chunk 0 */
+	assert(vbd_read(v, buf, 10, 3 * CHUNK + 5) == 10);	/* chunk 3 */
+	assert(vbd_fetched(v) == 2);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK);		/* hit */
+	assert(vbd_fetched(v) == 2);
+
+	/* check_all in reopen fetches the rest of the base; the zero half
+	 * beyond its end is never fetched */
+	v = reopen(v);
+	assert(vbd_fetched(v) == SIZE / 2 / CHUNK);
+	check_all(v);
+	assert(vbd_fetched(v) == SIZE / 2 / CHUNK);
+
+	/* a write to a cached chunk is served from the data log afterwards */
+	fill_random(buf, 10);
+	assert(vbd_write(v, buf, 10, 5) == 10);
+	memcpy(ref + 5, buf, 10);
+	check_all(v);
+	assert(vbd_fetched(v) == SIZE / 2 / CHUNK);
+	teardown(v);
+}
+
 static void test_stale_base(void)
 {
 	struct vbd *v = setup();
@@ -237,6 +269,7 @@ int main(void)
 	RUN(test_torn_tail);
 	RUN(test_bad_super);
 	RUN(test_bad_record);
+	RUN(test_base_cache);
 	RUN(test_stale_base);
 
 	rcu_barrier();

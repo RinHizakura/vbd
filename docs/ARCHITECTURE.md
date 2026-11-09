@@ -23,25 +23,31 @@ because it is planned, not built.
  +----------------------------------------------------------------------+
  |  engine                                               src/volume.c   |
  |                                                                      |
- |  +-----------------------+        +-------------------------------+  |
- |  |  chunk map            |        |  append-only log              |  |
- |  |  XArray:              |------->|  replay, append, crc32c       |  |
- |  |  chunk -> record no.  |        |  src/crc32c.c                 |  |
- |  +-----------------------+        +-------------------------------+  |
- +----------------------------------------------------------------------+
+ |  +-------------------------------+   +-------------------------------+ |
+ |  |  data log                     |   |  base cache                   | |
+ |  |  XArray: chunk -> record no.  |   |  XArray: chunk -> record no.  | |
+ |  |  append-only file             |   |  append-only file, same format| |
+ |  +-------------------------------+   +---------------+---------------+ |
+ |         struct log, shared: replay, append, crc32c   |  fetch_chunk    | |
+ +------------------------------------------------------|-----------------+
  |  libxarray (deps/)        |  liburcu           |  POSIX file I/O      |
  +----------------------------------------------------------------------+
-                                                   |              |
-                                                   v              v
-                                           +-------------+  +-------------+
-                                           |  disk.log   |  |  base.img   |
-                                           |  append     |  |  read-only  |
-                                           +-------------+  +-------------+
+                               |                 |                |
+                               v                 v                v
+                       +-------------+   +----------------+  +-------------+
+                       |  disk.log   |   | disk.log.cache |  |  base.img   |
+                       |  writes     |   | fetched chunks |  |  read-only  |
+                       +-------------+   +----------------+  +-------------+
 ```
 
 Everything below `include/vbd.h` is the engine. Everything above it is a
 consumer: the CLI and the tests today, the ublk server later. The engine has
 no knowledge of what sits above it.
+
+A read looks in the data log first, then the base cache; a cache miss calls
+`fetch_chunk`, which brings one chunk of the base in and appends it to the
+cache. `fetch_chunk` is the only code that touches the base, so a remote
+backend replaces one function.
 
 ## A volume in memory and on disk
 
@@ -71,7 +77,9 @@ no knowledge of what sits above it.
 - Record number and file offset are interchangeable:
   `rec_off(n) = 4096 + n * rec_size`. The map stores only the small integer
   `n` as an XArray value entry; no per-chunk allocation.
-- Chunks never written (1..4) have no entry; reads of them go to the base.
+- Chunks never written (1..4) have no entry; reads of them go to the base
+  cache, and on a miss there, to the base image. The cache is a second
+  `struct log` over `disk.log.cache` with exactly this layout.
 
 ## On-disk format
 

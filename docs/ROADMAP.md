@@ -42,10 +42,21 @@ Remaining:
 
 ## P2: lazy fetch
 
-- base cache XArray: chunk index -> offset in a local cache file;
-  mark 0 = present, mark 1 = fetch in flight
-- fetcher interface with two backends: local file, HTTP range requests
-- waiting readers block on the in-flight mark instead of refetching
+Done:
+
+- base cache: a second log file (`disk.log.cache`, same format) with its own
+  XArray; a base chunk is fetched on first read, appended there and served
+  from the cache afterwards; chunks past the end of the base are never
+  fetched. `vbd info` reports `fetched`.
+- `fetch_chunk` is the single place that talks to the base; today it is a
+  `pread` of the local file
+
+Remaining:
+
+- HTTP range backend behind `fetch_chunk`; super block records URL, size
+  and ETag instead of path and mtime
+- in-flight mark on the cache map so concurrent misses on one chunk fetch
+  once
 - background prefetcher uses `xa_find` to fill holes near recent reads
 - verify every fetched chunk against a manifest hash before caching
 - test: mount a raw image over HTTP, `fsck` it, confirm only a small

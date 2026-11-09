@@ -22,11 +22,14 @@ head -c 1M /dev/zero > zero.img
 
 "$VBD" create t.log 2M 4K base.img
 [ "$("$VBD" info t.log)" = "size 2097152
-chunk 4096" ] || fail info
+chunk 4096
+fetched 0" ] || fail info
 
 # first MiB falls through to the base, second MiB was never written
 "$VBD" read t.log 0 1M | cmp -s - base.img || fail base passthrough
 "$VBD" read t.log 1M 1M | cmp -s - zero.img || fail zero fill
+[ "$("$VBD" info t.log | sed -n 3p)" = "fetched 256" ] || fail "cache holds the base half only"
+[ -f t.log.cache ] || fail "cache file"
 
 # unaligned write across two chunks
 printf 'hello vbd' | "$VBD" write t.log 4090
