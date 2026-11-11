@@ -15,7 +15,7 @@
  * truncated there.
  *
  * The super block names the base image (a local path or an http(s) URL) and
- * remembers its size and a validator from the backend (base.h), so a log is
+ * remembers its size and a validator from the backend (base/base.h), so a log is
  * never paired with the wrong base by mistake.
  */
 #include <errno.h>
@@ -35,7 +35,7 @@
 #include "common.h"
 #include "vbd.h"
 #include "crc32c.h"
-#include "base.h"
+#include "base/base.h"
 
 #define VBD_MAGIC	0x31646276u	/* "vbd1" */
 #define VBD_VERSION	1

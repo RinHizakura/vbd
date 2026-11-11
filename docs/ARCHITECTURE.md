@@ -32,12 +32,12 @@ only when the volume was created with a base image.
  |  a read looks in the data log,  .           miss | fetch_chunk    .  |
  |  then the base cache; with no   .                v                .  |
  |  base an unwritten chunk reads  .  +---------------------------+  .  |
- |  as zeros                       .  |  base_ops      src/base.h |  .  |
+ |  as zeros                       .  |  base_ops src/base/base.h |  .  |
  |                                 .  |  probe open read close    |  .  |
  |                                 .  +-----+---------------+-----+  .  |
  |                                 .        |    one of     |        .  |
  |                                 .  +-----+------+  +-----+------+ .  |
- |                                 .  | base_file  |  | base_http  | .  |
+ |                                 .  | base/file.c|  | base/http.c| .  |
  |                                 .  | pread      |  | libcurl    | .  |
  |                                 .  +-----+------+  +-----+------+ .  |
  |                                 . . . . .|. . . . . . . .|. . . . .  |
@@ -49,7 +49,7 @@ only when the volume was created with a base image.
                                       +-----------+   +-----------+
 
  libraries: libxarray (deps/), liburcu, POSIX file I/O; libcurl is used by
- base_http only.
+ the http backend only.
 ```
 
 Everything below `include/vbd.h` is the engine. Everything above it is a
@@ -57,7 +57,7 @@ consumer: the CLI and the tests today, the ublk server later. The engine has
 no knowledge of what sits above it.
 
 The base is reached only from `fetch_chunk`, and only through `struct
-base_ops` (`src/base.h`). The backend is picked from the name given to
+base_ops` (`src/base/base.h`). The backend is picked from the name given to
 `create`; the engine never knows which one it got, and never needs to.
 
 ## A volume in memory and on disk

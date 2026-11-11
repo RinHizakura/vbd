@@ -9,7 +9,7 @@ CPPFLAGS = -Iinclude -I$(XARRAY)/include -I$(XARRAY)/shim -I$(XARRAY)/lib -D_LGP
 LDLIBS   = $(XARRAY_LIB) -lurcu -lcurl -lpthread
 
 LIB      = build/libvbd.a
-LIB_OBJS = build/volume.o build/crc32c.o build/base_file.o build/base_http.o
+LIB_OBJS = build/volume.o build/crc32c.o build/base/file.o build/base/http.o
 BIN      = build/vbd
 
 .PHONY: all test clean $(XARRAY_LIB)
@@ -25,6 +25,7 @@ $(LIB): $(LIB_OBJS)
 	ar rcs $@ $^
 
 build/%.o: src/%.c include/*.h | build
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 build/volume_test: tests/volume_test.c $(LIB) $(XARRAY_LIB) | build

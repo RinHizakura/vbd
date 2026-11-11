@@ -49,8 +49,8 @@ Done:
   from the cache afterwards; chunks past the end of the base are never
   fetched. `vbd info` reports `fetched`.
 - `fetch_chunk` is the single place that talks to the base, through
-  `struct base_ops` (`src/base.h`): `base_file.c` is `pread` of a local
-  file, `base_http.c` an HTTP range request over libcurl. `probe` gives the
+  `struct base_ops` (`src/base/`): `file.c` is `pread` of a local
+  file, `http.c` an HTTP range request over libcurl. `probe` gives the
   stored name, size and a validator (mtime, or ETag / Last-Modified) that
   `create` records and `open` compares, refusing a base that changed. `tests/http_test.sh` serves an image with
   busybox httpd and checks fetch counts, caching and the stale check.
