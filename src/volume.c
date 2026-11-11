@@ -74,8 +74,9 @@ struct vbd {
 	uint64_t size;
 	uint32_t chunk_size;
 	uint64_t rec_size;	/* HDR_SIZE + chunk_size */
-	const struct base_ops *base_ops;
-	void *base;		/* NULL: all-zero base */
+	const struct base_ops *base_ops;	/* NULL: all-zero base */
+	void *base;		/* NULL while base_ops is set: base unreachable, offline */
+	int base_err;		/* why the base is unreachable, 0 when it is open */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	struct log data;	/* what the volume was written with */
 	struct log cache;	/* base chunks fetched so far; unused without a base */
@@ -279,6 +280,12 @@ static int log_read(struct vbd *v, struct log *l, uint64_t rec, uint8_t *buf,
 }
 
 /* Open the base named in the super block and check it is unchanged. */
+/*
+ * Bind the base named in the super block. A base that cannot be reached
+ * leaves the volume open offline: cached chunks still read, a miss returns
+ * the error seen here. A base that changed is refused with -ESTALE, since
+ * the cache may then be wrong.
+ */
 static int open_base(struct vbd *v, const struct super *sb)
 {
 	char stored[sizeof(sb->base)], tag[BASE_TAG_LEN];
@@ -288,14 +295,18 @@ static int open_base(struct vbd *v, const struct super *sb)
 	if (!sb->base[0])
 		return 0;
 	v->base_ops = base_ops_for(sb->base);
+	v->base_size = sb->base_size;
 	ret = v->base_ops->probe(sb->base, stored, sizeof(stored), &size, tag, sizeof(tag));
-	if (ret)
-		return ret;
+	if (ret) {
+		v->base_err = ret;
+		return 0;
+	}
 	if (size != sb->base_size || strcmp(tag, sb->base_tag))
 		return -ESTALE;
-	v->base_size = size;
 	v->base = v->base_ops->open(sb->base);
-	return v->base ? 0 : -errno;
+	if (!v->base)
+		v->base_err = -errno;
+	return 0;
 }
 
 struct vbd *vbd_open(const char *log_path)
@@ -319,7 +330,7 @@ struct vbd *vbd_open(const char *log_path)
 	if ((err = log_replay(v, &v->data)))
 		goto fail;
 
-	if (v->base) {
+	if (v->base_ops) {
 		char *cp = cache_path(log_path);
 
 		if (!cp) {
@@ -358,6 +369,7 @@ void vbd_close(struct vbd *v)
 uint64_t vbd_size(const struct vbd *v)		{ return v->size; }
 uint32_t vbd_chunk_size(const struct vbd *v)	{ return v->chunk_size; }
 uint64_t vbd_fetched(const struct vbd *v)	{ return v->cache.nrec; }
+int vbd_base_err(const struct vbd *v)		{ return v->base_err; }
 
 /*
  * Bring @chunk of the base into the cache and copy @len bytes of it, from
@@ -370,9 +382,12 @@ uint64_t vbd_fetched(const struct vbd *v)	{ return v->cache.nrec; }
 static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		       uint32_t within, uint32_t len)
 {
-	uint8_t *tmp = malloc(v->chunk_size);
+	uint8_t *tmp;
 	int ret;
 
+	if (!v->base)
+		return v->base_err;	/* offline: nothing to fetch from */
+	tmp = malloc(v->chunk_size);
 	if (!tmp)
 		return -ENOMEM;
 	ret = v->base_ops->read(v->base, chunk * v->chunk_size, tmp, v->chunk_size);
@@ -392,7 +407,7 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 
 	if (e)
 		return log_read(v, &v->data, xa_to_value(e), buf, within, len);
-	if (!v->base || chunk * v->chunk_size >= v->base_size) {
+	if (!v->base_ops || chunk * v->chunk_size >= v->base_size) {
 		memset(buf, 0, len);	/* no base, or past its end: nothing to fetch */
 		return 0;
 	}

@@ -56,13 +56,9 @@ Everything below `include/vbd.h` is the engine. Everything above it is a
 consumer: the CLI and the tests today, the ublk server later. The engine has
 no knowledge of what sits above it.
 
-A volume created without a base is just the data log. With a base, a cache
-miss calls `fetch_chunk`, which brings one chunk of the base in and appends
-it to the cache. `fetch_chunk` is the only code that touches the base, and
-only through `struct base_ops` (`src/base.h`: probe, open, read, close). The
-backend is picked from the name given to `create`: `src/base_file.c` for a
-local path, `src/base_http.c` for an `http(s)://` URL. The engine never
-knows which one it got.
+The base is reached only from `fetch_chunk`, and only through `struct
+base_ops` (`src/base.h`). The backend is picked from the name given to
+`create`; the engine never knows which one it got, and never needs to.
 
 ## A volume in memory and on disk
 

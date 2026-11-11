@@ -54,11 +54,12 @@ Done:
   stored name, size and a validator (mtime, or ETag / Last-Modified) that
   `create` records and `open` compares, refusing a base that changed. `tests/http_test.sh` serves an image with
   busybox httpd and checks fetch counts, caching and the stale check.
+- Offline open: a base that cannot be probed leaves the volume open with
+  `vbd_base_err` set; cached chunks read, misses return that error. Only a
+  base that answers and has changed is refused.
 
 Remaining:
 
-- open needs the server reachable even when every chunk is cached; allow an
-  offline open that trusts the cache
 - in-flight mark on the cache map so concurrent misses on one chunk fetch
   once
 - background prefetcher uses `xa_find` to fill holes near recent reads

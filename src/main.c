@@ -15,7 +15,7 @@
 static const char *usage_text =
 	"usage: vbd <command> <log> ...\n"
 	"  create <log> <size> <chunk> [base]  new volume; sizes take K, M, G suffixes\n"
-	"  info   <log>                        print size, chunk size, chunks fetched from the base\n"
+	"  info   <log>                        print size, chunk size, chunks fetched, base state\n"
 	"  read   <log> <off> <len>            copy a range to stdout\n"
 	"  write  <log> <off>                  copy stdin to the volume and flush\n";
 
@@ -65,6 +65,8 @@ static int cmd_info(struct vbd *v)
 {
 	printf("size %" PRIu64 "\nchunk %" PRIu32 "\nfetched %" PRIu64 "\n",
 	       vbd_size(v), vbd_chunk_size(v), vbd_fetched(v));
+	if (vbd_base_err(v))
+		printf("base offline: %s\n", strerror(-vbd_base_err(v)));
 	return 0;
 }
 

@@ -255,6 +255,36 @@ static void test_stale_base(void)
 	teardown(NULL);
 }
 
+/* A base that is gone leaves the volume open offline; only misses fail. */
+static void test_offline_base(void)
+{
+	struct vbd *v = setup();
+	char gone[sizeof(base_path) + 5];
+
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK);		/* chunk 0 cached */
+	vbd_close(v);
+	snprintf(gone, sizeof(gone), "%s.gone", base_path);
+	assert(rename(base_path, gone) == 0);
+
+	v = vbd_open(log_path);
+	assert(v && vbd_base_err(v) == -ENOENT);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK);		/* served from cache */
+	assert(memcmp(buf, ref, CHUNK) == 0);
+	assert(vbd_read(v, buf, CHUNK, CHUNK) == -ENOENT);	/* miss */
+	assert(vbd_read(v, buf, CHUNK, SIZE / 2) == CHUNK);	/* past the base: zeros */
+	fill_random(buf, CHUNK);
+	assert(vbd_write(v, buf, CHUNK, 2 * CHUNK) == CHUNK);	/* whole chunk, no RMW */
+	assert(vbd_fetched(v) == 1);
+	vbd_close(v);
+
+	assert(rename(gone, base_path) == 0);
+	v = vbd_open(log_path);
+	assert(v && vbd_base_err(v) == 0);
+	assert(vbd_read(v, buf, CHUNK, CHUNK) == CHUNK);	/* back online */
+	assert(vbd_fetched(v) == 2);
+	teardown(v);
+}
+
 #define RUN(t)	do { t(); puts("  " #t); } while (0)
 
 int main(void)
@@ -271,6 +301,7 @@ int main(void)
 	RUN(test_bad_record);
 	RUN(test_base_cache);
 	RUN(test_stale_base);
+	RUN(test_offline_base);
 
 	rcu_barrier();
 	rcu_unregister_thread();

@@ -6,8 +6,10 @@
  * create time. Reads of a chunk that was never written fall through to the
  * base image (or zeros); base chunks are fetched on first use into a cache
  * file next to the log and served from there afterwards. The base must not
- * change; open fails with ESTALE if its size or mtime differs from what
- * create recorded.
+ * change; open fails with ESTALE if its size or validator (mtime, ETag)
+ * differs from what create recorded. A base that cannot be reached at all
+ * still opens, offline: cached chunks read normally, a cache miss fails
+ * with the error that reaching the base gave.
  * Every write appends a whole chunk to the log; the XArray maps chunk
  * index -> log record, so the newest record for a chunk always wins.
  *
@@ -39,6 +41,8 @@ uint64_t vbd_size(const struct vbd *v);
 uint32_t vbd_chunk_size(const struct vbd *v);
 /* Base chunks fetched into the local cache so far (0 without a base). */
 uint64_t vbd_fetched(const struct vbd *v);
+/* 0 when the base is reachable (or there is none), else the negative errno. */
+int vbd_base_err(const struct vbd *v);
 
 /*
  * pread/pwrite semantics: the return value is the number of bytes

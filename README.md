@@ -47,14 +47,11 @@ make clean
 ## Usage
 
 A volume is a log file plus an optional read-only base image, named when the
-volume is created. The base is a local file or an `http://` / `https://` URL
-whose server supports range requests. Reads of a chunk that was never
-written fall through to the base image; a base chunk is fetched on first
-read into `disk.log.cache` and served from there afterwards, so only the
-parts of a remote image that are actually read get downloaded. Every write
-appends a whole chunk to the log. The base must not change afterwards:
-opening a volume whose base has a different size, mtime or ETag than at
-create time fails.
+volume is created. The base can be a local file or an `http://` / `https://`
+URL whose server supports range requests; only the parts of it that are
+actually read get downloaded, and once read they stay available even when
+the server is not. The base must not change while volumes depend on it: a
+volume whose base was modified refuses to open.
 
 Sizes and offsets accept `K`, `M` and `G` suffixes.
 
@@ -66,8 +63,8 @@ vbd read disk.log 0 4K                # range to stdout
 printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 ```
 
-Reopening a log replays it to rebuild the chunk map. A record that was only
-partly written when the process died is detected by its checksum and dropped.
+A volume survives a crash of the process writing it: a write that was cut
+short is dropped on the next open, everything before it is kept.
 
 How the engine works is in `docs/ARCHITECTURE.md`; what comes next is in
 `docs/ROADMAP.md`.

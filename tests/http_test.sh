@@ -53,9 +53,12 @@ printf 'over http' | "$VBD" write t.log 70000
 { head -c 70000 www/base.img; printf 'over http'; tail -c +70010 www/base.img; } > expect.img
 "$VBD" read t.log 0 1M | cmp -s - expect.img || fail "read-modify-write"
 
-# the server must be reachable to open: it is asked whether the base changed
+# server down: the volume opens offline; cached chunks read, misses fail
+"$VBD" create v.log 2M 64K "http://127.0.0.1:$port/base.img"	# nothing cached
 kill "$pid"; wait "$pid" 2>/dev/null || true; pid=""
-expect 1 "$VBD" read t.log 0 64K
+"$VBD" info t.log | grep -q '^base offline' || fail "info should report offline"
+"$VBD" read t.log 0 1M | cmp -s - expect.img || fail "offline read from cache"
+expect 1 "$VBD" read v.log 0 64K
 
 # a base that changed on the server is refused
 touch -d 2000-01-01 www/base.img
