@@ -48,13 +48,17 @@ Done:
   XArray; a base chunk is fetched on first read, appended there and served
   from the cache afterwards; chunks past the end of the base are never
   fetched. `vbd info` reports `fetched`.
-- `fetch_chunk` is the single place that talks to the base; today it is a
-  `pread` of the local file
+- `fetch_chunk` is the single place that talks to the base, through
+  `struct base_ops` (`src/base.h`): `base_file.c` is `pread` of a local
+  file, `base_http.c` an HTTP range request over libcurl. `probe` gives the
+  stored name, size and a validator (mtime, or ETag / Last-Modified) that
+  `create` records and `open` compares, refusing a base that changed. `tests/http_test.sh` serves an image with
+  busybox httpd and checks fetch counts, caching and the stale check.
 
 Remaining:
 
-- HTTP range backend behind `fetch_chunk`; super block records URL, size
-  and ETag instead of path and mtime
+- open needs the server reachable even when every chunk is cached; allow an
+  offline open that trusts the cache
 - in-flight mark on the cache map so concurrent misses on one chunk fetch
   once
 - background prefetcher uses `xa_find` to fill holes near recent reads

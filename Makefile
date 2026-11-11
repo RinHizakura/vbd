@@ -6,10 +6,10 @@ XARRAY_LIB = $(XARRAY)/build/libxarray.a
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall
 CPPFLAGS = -Iinclude -I$(XARRAY)/include -I$(XARRAY)/shim -I$(XARRAY)/lib -D_LGPL_SOURCE
-LDLIBS   = $(XARRAY_LIB) -lurcu -lpthread
+LDLIBS   = $(XARRAY_LIB) -lurcu -lcurl -lpthread
 
 LIB      = build/libvbd.a
-LIB_OBJS = build/volume.o build/crc32c.o
+LIB_OBJS = build/volume.o build/crc32c.o build/base_file.o build/base_http.o
 BIN      = build/vbd
 
 .PHONY: all test clean $(XARRAY_LIB)
@@ -35,6 +35,7 @@ test: build/volume_test $(BIN)
 	./build/volume_test
 	tests/cli_test.sh $(BIN)
 	tests/crash_test.sh $(BIN)
+	tests/http_test.sh $(BIN)
 
 build:
 	mkdir -p $@

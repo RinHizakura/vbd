@@ -34,7 +34,8 @@ reclaimed.
 
 ## Build
 
-Requires `liburcu-dev`.
+Requires `liburcu-dev` and `libcurl4-openssl-dev`. The tests also use
+`busybox` for a local HTTP server.
 
 ```sh
 git submodule update --init
@@ -46,17 +47,21 @@ make clean
 ## Usage
 
 A volume is a log file plus an optional read-only base image, named when the
-volume is created. Reads of a chunk that was never written fall through to
-the base image; a base chunk is fetched on first read into `disk.log.cache`
-and served from there afterwards. Every write appends a whole chunk to the
-log. The base must not change afterwards: opening a volume whose base has a
-different size or mtime than at create time fails.
+volume is created. The base is a local file or an `http://` / `https://` URL
+whose server supports range requests. Reads of a chunk that was never
+written fall through to the base image; a base chunk is fetched on first
+read into `disk.log.cache` and served from there afterwards, so only the
+parts of a remote image that are actually read get downloaded. Every write
+appends a whole chunk to the log. The base must not change afterwards:
+opening a volume whose base has a different size, mtime or ETag than at
+create time fails.
 
 Sizes and offsets accept `K`, `M` and `G` suffixes.
 
 ```sh
 vbd create disk.log 1G 64K base.img   # new volume, 1 GiB, 64 KiB chunks
-vbd info disk.log
+vbd create disk.log 1G 64K https://images.example/ubuntu.img   # or a remote base
+vbd info disk.log                     # size, chunk size, base chunks fetched so far
 vbd read disk.log 0 4K                # range to stdout
 printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 ```

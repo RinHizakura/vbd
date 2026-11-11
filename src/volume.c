@@ -14,8 +14,9 @@
  * header or checksum does not verify marks a torn tail and the file is
  * truncated there.
  *
- * The super block names the base image and remembers its size and mtime, so
- * a log is never paired with the wrong base by mistake.
+ * The super block names the base image (a local path or an http(s) URL) and
+ * remembers its size and a validator from the backend (base.h), so a log is
+ * never paired with the wrong base by mistake.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -34,6 +35,7 @@
 #include "common.h"
 #include "vbd.h"
 #include "crc32c.h"
+#include "base.h"
 
 #define VBD_MAGIC	0x31646276u	/* "vbd1" */
 #define VBD_VERSION	1
@@ -47,9 +49,9 @@ struct super {
 	uint32_t version;
 	uint32_t chunk_size;
 	uint64_t size;
-	uint64_t base_size;	/* st_size of the base at create */
-	int64_t  base_mtime;	/* st_mtim of the base at create, in ns */
-	char     base[SUPER_SIZE - 40];	/* absolute path; empty: all-zero base */
+	uint64_t base_size;	/* size of the base at create */
+	char     base_tag[BASE_TAG_LEN];	/* base validator at create (base_ops.probe) */
+	char     base[SUPER_SIZE - 32 - BASE_TAG_LEN];	/* path or URL; empty: zeros */
 };
 
 struct rec_hdr {
@@ -72,7 +74,8 @@ struct vbd {
 	uint64_t size;
 	uint32_t chunk_size;
 	uint64_t rec_size;	/* HDR_SIZE + chunk_size */
-	int base_fd;		/* -1: all-zero base */
+	const struct base_ops *base_ops;
+	void *base;		/* NULL: all-zero base */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	struct log data;	/* what the volume was written with */
 	struct log cache;	/* base chunks fetched so far; unused without a base */
@@ -119,11 +122,6 @@ static bool super_valid(const struct super *sb)
 	       !sb->base[sizeof(sb->base) - 1];
 }
 
-static int64_t mtime_ns(const struct stat *st)
-{
-	return st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
-}
-
 static char *cache_path(const char *log_path)
 {
 	char *p = malloc(strlen(log_path) + sizeof(CACHE_SUFFIX));
@@ -157,21 +155,11 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	if (!IS_POWER_OF_2(chunk_size) || !IS_ALIGNED(size, chunk_size))
 		return -EINVAL;
 	if (base_path) {
-		char *abs = realpath(base_path, NULL);
-		struct stat st;
-
-		if (!abs)
-			return -errno;
-		if (strlen(abs) >= sizeof(sb.base)) {
-			free(abs);
-			return -ENAMETOOLONG;
-		}
-		strcpy(sb.base, abs);
-		free(abs);
-		if (stat(sb.base, &st))
-			return -errno;
-		sb.base_size = st.st_size;
-		sb.base_mtime = mtime_ns(&st);
+		ret = base_ops_for(base_path)->probe(base_path, sb.base, sizeof(sb.base),
+						     &sb.base_size, sb.base_tag,
+						     sizeof(sb.base_tag));
+		if (ret)
+			return ret;
 	}
 	sb.crc = super_crc(&sb);
 	ret = create_file(log_path, &sb);
@@ -293,17 +281,21 @@ static int log_read(struct vbd *v, struct log *l, uint64_t rec, uint8_t *buf,
 /* Open the base named in the super block and check it is unchanged. */
 static int open_base(struct vbd *v, const struct super *sb)
 {
-	struct stat st;
+	char stored[sizeof(sb->base)], tag[BASE_TAG_LEN];
+	uint64_t size;
+	int ret;
 
 	if (!sb->base[0])
 		return 0;
-	v->base_fd = open(sb->base, O_RDONLY);
-	if (v->base_fd < 0 || fstat(v->base_fd, &st))
-		return -errno;
-	if ((uint64_t)st.st_size != sb->base_size || mtime_ns(&st) != sb->base_mtime)
+	v->base_ops = base_ops_for(sb->base);
+	ret = v->base_ops->probe(sb->base, stored, sizeof(stored), &size, tag, sizeof(tag));
+	if (ret)
+		return ret;
+	if (size != sb->base_size || strcmp(tag, sb->base_tag))
 		return -ESTALE;
-	v->base_size = sb->base_size;
-	return 0;
+	v->base_size = size;
+	v->base = v->base_ops->open(sb->base);
+	return v->base ? 0 : -errno;
 }
 
 struct vbd *vbd_open(const char *log_path)
@@ -314,7 +306,6 @@ struct vbd *vbd_open(const char *log_path)
 
 	if (!v)
 		return NULL;
-	v->base_fd = -1;
 	log_init(&v->data);
 	log_init(&v->cache);
 
@@ -328,7 +319,7 @@ struct vbd *vbd_open(const char *log_path)
 	if ((err = log_replay(v, &v->data)))
 		goto fail;
 
-	if (v->base_fd >= 0) {
+	if (v->base) {
 		char *cp = cache_path(log_path);
 
 		if (!cp) {
@@ -359,8 +350,8 @@ void vbd_close(struct vbd *v)
 		return;
 	log_close(&v->data);
 	log_close(&v->cache);
-	if (v->base_fd >= 0)
-		close(v->base_fd);
+	if (v->base)
+		v->base_ops->close(v->base);
 	free(v);
 }
 
@@ -384,7 +375,7 @@ static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 
 	if (!tmp)
 		return -ENOMEM;
-	ret = full_pread(v->base_fd, tmp, v->chunk_size, chunk * v->chunk_size);
+	ret = v->base_ops->read(v->base, chunk * v->chunk_size, tmp, v->chunk_size);
 	if (!ret)
 		ret = log_append(v, &v->cache, chunk, tmp);
 	if (!ret)
@@ -401,7 +392,7 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 
 	if (e)
 		return log_read(v, &v->data, xa_to_value(e), buf, within, len);
-	if (v->base_fd < 0 || chunk * v->chunk_size >= v->base_size) {
+	if (!v->base || chunk * v->chunk_size >= v->base_size) {
 		memset(buf, 0, len);	/* no base, or past its end: nothing to fetch */
 		return 0;
 	}
