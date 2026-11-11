@@ -62,10 +62,11 @@ vbd info disk.log                     # size, chunk size, base chunks fetched so
 vbd read disk.log 0 4K                # range to stdout
 printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 vbd snapshot disk.log                 # freeze the current content; prints the snapshot number
+vbd read disk.log 0 4K 0              # the same range as it was at snapshot 0
 ```
 
-Snapshots are numbered from 0. Reopening a volume as it was at a snapshot
-is not built yet; see `docs/ROADMAP.md`.
+Snapshots are numbered from 0 and cost one chunk of log space each. Reading
+as of a snapshot never changes the volume.
 
 A volume survives a crash of the process writing it: a write that was cut
 short is dropped on the next open, everything before it is kept.

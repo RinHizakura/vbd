@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,8 +16,8 @@
 static const char *usage_text =
 	"usage: vbd <command> <log> ...\n"
 	"  create <log> <size> <chunk> [base]  new volume; sizes take K, M, G suffixes\n"
-	"  info   <log>                        print size, chunk size, epoch, chunks fetched, base state\n"
-	"  read   <log> <off> <len>            copy a range to stdout\n"
+	"  info   <log> [snapshot]             print size, chunk size, epoch, chunks fetched, base state\n"
+	"  read   <log> <off> <len> [snapshot] copy a range to stdout, as of a snapshot if given\n"
 	"  write  <log> <off>                  copy stdin to the volume and flush\n"
 	"  snapshot <log>                      freeze the current content; prints the snapshot number\n";
 
@@ -146,7 +147,8 @@ int main(int argc, char **argv)
 {
 	const char *cmd, *log;
 	struct vbd *v;
-	uint64_t off, len;
+	uint64_t off, len, at = 0;
+	bool have_at = false;
 	int ret;
 
 	if (argc < 3)
@@ -160,11 +162,17 @@ int main(int argc, char **argv)
 		return cmd_create(log, argv[1], argv[2], argc == 4 ? argv[3] : NULL);
 	}
 
-	if (!strcmp(cmd, "info") || !strcmp(cmd, "snapshot")) {
+	if (!strcmp(cmd, "info")) {
+		have_at = argc == 2;
+		if (argc > 2 || (have_at && parse_size(argv[1], &at)))
+			return usage();
+	} else if (!strcmp(cmd, "snapshot")) {
 		if (argc != 1)
 			return usage();
 	} else if (!strcmp(cmd, "read")) {
-		if (argc != 3 || parse_size(argv[1], &off) || parse_size(argv[2], &len))
+		have_at = argc == 4;
+		if (argc < 3 || argc > 4 || parse_size(argv[1], &off) || parse_size(argv[2], &len) ||
+		    (have_at && parse_size(argv[3], &at)))
 			return usage();
 	} else if (!strcmp(cmd, "write")) {
 		if (argc != 2 || parse_size(argv[1], &off))
@@ -174,7 +182,7 @@ int main(int argc, char **argv)
 	}
 
 	rcu_register_thread();
-	v = vbd_open(log);
+	v = have_at ? vbd_open_at(log, at) : vbd_open(log);
 	if (!v) {
 		fprintf(stderr, "vbd: %s: %s\n", log, strerror(errno));
 		return 1;

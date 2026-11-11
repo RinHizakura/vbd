@@ -37,6 +37,12 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 
 /* Open a log and its base. Returns NULL and sets errno. */
 struct vbd *vbd_open(const char *log_path);
+
+/*
+ * Open the volume as it was when snapshot @snapshot was taken: a read-only
+ * view, writes and snapshots return -EROFS. ENOENT if no such snapshot.
+ */
+struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot);
 void vbd_close(struct vbd *v);
 
 uint64_t vbd_size(const struct vbd *v);

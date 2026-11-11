@@ -45,6 +45,13 @@ printf 'hello vbd' | "$VBD" write t.log 4090
 [ "$(stat -c %s t.log)" -eq $((4096 + 4 * (64 + 4096))) ] || fail "log holds four records"
 "$VBD" read t.log 0 1M | cmp -s - expect.img || fail "content unchanged by snapshots"
 
+# a snapshot number reads the volume as it was then; the live view moves on
+printf 'later' | "$VBD" write t.log 4090
+"$VBD" read t.log 0 1M 0 | cmp -s - expect.img || fail "read as of snapshot 0"
+"$VBD" read t.log 0 1M 1 | cmp -s - expect.img || fail "read as of snapshot 1"
+[ "$("$VBD" read t.log 4090 5)" = later ] || fail "live read sees the new write"
+expect 1 "$VBD" read t.log 0 1M 2                     # no such snapshot
+
 # the write survives a reopen
 "$VBD" read t.log 4090 9 | cmp -s - <<'EOT' || fail reopen
 hello vbd

@@ -358,6 +358,43 @@ static void test_snapshot(void)
 	teardown(v);
 }
 
+static void test_open_at(void)
+{
+	struct vbd *v = setup();
+	uint8_t a[CHUNK], b[CHUNK], c[CHUNK], d[CHUNK];
+
+	fill_random(a, CHUNK); fill_random(b, CHUNK);
+	fill_random(c, CHUNK); fill_random(d, CHUNK);
+	assert(vbd_write(v, a, CHUNK, 0) == CHUNK);
+	assert(vbd_snapshot(v) == 0);			/* snapshot 0: chunk 0 = a */
+	assert(vbd_write(v, b, CHUNK, 0) == CHUNK);
+	assert(vbd_write(v, c, CHUNK, CHUNK) == CHUNK);
+	assert(vbd_snapshot(v) == 0);			/* snapshot 1: a->b, chunk 1 = c */
+	assert(vbd_write(v, d, CHUNK, 0) == CHUNK);	/* live: chunk 0 = d */
+	vbd_close(v);
+
+	v = vbd_open_at(log_path, 0);
+	assert(v && vbd_epoch(v) == 2);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, a, CHUNK) == 0);
+	assert(vbd_read(v, buf, CHUNK, CHUNK) == CHUNK && memcmp(buf, ref + CHUNK, CHUNK) == 0);
+	assert(vbd_write(v, a, CHUNK, 0) == -EROFS);
+	assert(vbd_snapshot(v) == -EROFS);
+	vbd_close(v);
+
+	v = vbd_open_at(log_path, 1);
+	assert(v);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, b, CHUNK) == 0);
+	assert(vbd_read(v, buf, CHUNK, CHUNK) == CHUNK && memcmp(buf, c, CHUNK) == 0);
+	vbd_close(v);
+
+	assert(vbd_open_at(log_path, 2) == NULL && errno == ENOENT);	/* not taken yet */
+
+	v = vbd_open(log_path);					/* live view untouched */
+	assert(v && vbd_epoch(v) == 2);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, d, CHUNK) == 0);
+	teardown(v);
+}
+
 #define RUN(t)	do { t(); puts("  " #t); } while (0)
 
 int main(void)
@@ -377,6 +414,7 @@ int main(void)
 	RUN(test_offline_base);
 	RUN(test_concurrent_fetch);
 	RUN(test_snapshot);
+	RUN(test_open_at);
 
 	rcu_barrier();
 	rcu_unregister_thread();

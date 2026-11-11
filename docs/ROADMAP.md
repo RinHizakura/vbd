@@ -77,13 +77,15 @@ Done:
   so the bump survives a reopen with no further writes. Replay takes the
   largest epoch it sees. `vbd snapshot` prints the frozen number, `vbd info`
   the current epoch.
+- `vbd_open_at(log, N)`: replay skips records with epoch > N and the view
+  is read-only (writes and snapshots return EROFS). `vbd read ... N` and
+  `vbd info ... N` use it.
 
 Remaining:
 
 - `fork(parent, name)`: new directory, empty XArray, parent pointer; parent
   is frozen at its current epoch
 - lookup walks the branch chain before falling back to the base cache
-- `at(epoch)`: open read-only, replaying only records with epoch <= N
 - a timer that snapshots periodically; manifest records epoch -> time
 - `at(branch, time)`: load the newest checkpoint at or before the time,
   replay the log up to that epoch, expose the result as a read-only branch

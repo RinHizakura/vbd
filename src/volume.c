@@ -72,6 +72,9 @@ struct rec_hdr {
  */
 #define SNAP_MARK	UINT64_MAX
 
+/* vbd.at value for a normal, writable open */
+#define LIVE		UINT64_MAX
+
 struct log {
 	int fd;
 	uint64_t nrec;		/* records in the file; next append goes here */
@@ -88,6 +91,7 @@ struct vbd {
 	void *base;		/* NULL while base_ops is set: base unreachable, offline */
 	int base_err;		/* why the base is unreachable, 0 when it is open */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
+	uint64_t at;		/* LIVE, or the snapshot this read-only view shows */
 	struct log data;	/* what the volume was written with */
 	struct log cache;	/* base chunks fetched so far; unused without a base */
 	pthread_mutex_t fetch_lock;	/* guards INFLIGHT marks in cache.map */
@@ -255,8 +259,8 @@ static int log_replay(struct vbd *v, struct log *l)
 			break;		/* torn tail */
 		if (h.epoch > l->epoch)
 			l->epoch = h.epoch;
-		if (h.chunk == SNAP_MARK)
-			continue;
+		if (h.chunk == SNAP_MARK || h.epoch > v->at)
+			continue;	/* marker, or written after the snapshot shown */
 		ret = xa_err(xa_store(&l->map, h.chunk, xa_mk_value(l->nrec), GFP_KERNEL));
 		if (ret)
 			goto out;
@@ -335,7 +339,7 @@ static int open_base(struct vbd *v, const struct super *sb)
 	return 0;
 }
 
-struct vbd *vbd_open(const char *log_path)
+struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
 	struct super sb, csb;
@@ -343,6 +347,7 @@ struct vbd *vbd_open(const char *log_path)
 
 	if (!v)
 		return NULL;
+	v->at = snapshot;
 	log_init(&v->data);
 	log_init(&v->cache);
 	pthread_mutex_init(&v->fetch_lock, NULL);
@@ -357,6 +362,10 @@ struct vbd *vbd_open(const char *log_path)
 		goto fail;
 	if ((err = log_replay(v, &v->data)))
 		goto fail;
+	if (v->at != LIVE && v->at >= v->data.epoch) {
+		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
+		goto fail;
+	}
 
 	if (v->base_ops) {
 		char *cp = cache_path(log_path);
@@ -381,6 +390,11 @@ fail:
 	vbd_close(v);
 	errno = -err;
 	return NULL;
+}
+
+struct vbd *vbd_open(const char *log_path)
+{
+	return vbd_open_at(log_path, LIVE);
 }
 
 void vbd_close(struct vbd *v)
@@ -505,6 +519,8 @@ ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off)
 	size_t done = 0;
 	int ret = 0;
 
+	if (v->at != LIVE)
+		return -EROFS;
 	if (off >= v->size)
 		return -ENOSPC;
 	len = clamp_len(v, len, off);
@@ -548,9 +564,12 @@ uint64_t vbd_epoch(const struct vbd *v)		{ return v->data.epoch; }
 int vbd_snapshot(struct vbd *v)
 {
 	struct log *l = &v->data;
-	uint8_t *zero = calloc(1, v->chunk_size);
+	uint8_t *zero;
 	int ret;
 
+	if (v->at != LIVE)
+		return -EROFS;
+	zero = calloc(1, v->chunk_size);
 	if (!zero)
 		return -ENOMEM;
 	/*
