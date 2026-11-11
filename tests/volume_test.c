@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,6 +286,39 @@ static void test_offline_base(void)
 	teardown(v);
 }
 
+/* Many threads miss on the same chunks at once; each chunk is fetched once. */
+#define NTHREADS	8
+
+static void *reader(void *arg)
+{
+	struct vbd *v = arg;
+	uint8_t *mine = malloc(CHUNK);
+	size_t nchunk = SIZE / 2 / CHUNK;
+
+	rcu_register_thread();
+	for (size_t i = 0; i < nchunk; i++) {
+		assert(vbd_read(v, mine, CHUNK, i * CHUNK) == CHUNK);
+		assert(memcmp(mine, ref + i * CHUNK, CHUNK) == 0);
+	}
+	rcu_unregister_thread();
+	free(mine);
+	return NULL;
+}
+
+static void test_concurrent_fetch(void)
+{
+	struct vbd *v = setup();
+	pthread_t t[NTHREADS];
+
+	for (int i = 0; i < NTHREADS; i++)
+		assert(pthread_create(&t[i], NULL, reader, v) == 0);
+	for (int i = 0; i < NTHREADS; i++)
+		assert(pthread_join(t[i], NULL) == 0);
+	assert(vbd_fetched(v) == SIZE / 2 / CHUNK);
+	check_all(v);
+	teardown(v);
+}
+
 #define RUN(t)	do { t(); puts("  " #t); } while (0)
 
 int main(void)
@@ -302,6 +336,7 @@ int main(void)
 	RUN(test_base_cache);
 	RUN(test_stale_base);
 	RUN(test_offline_base);
+	RUN(test_concurrent_fetch);
 
 	rcu_barrier();
 	rcu_unregister_thread();

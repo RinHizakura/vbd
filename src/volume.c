@@ -80,7 +80,16 @@ struct vbd {
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	struct log data;	/* what the volume was written with */
 	struct log cache;	/* base chunks fetched so far; unused without a base */
+	pthread_mutex_t fetch_lock;	/* guards INFLIGHT marks in cache.map */
+	pthread_cond_t fetch_done;	/* a fetch finished, marks may have changed */
 };
+
+/*
+ * Cache map entry for a chunk being fetched right now. A pointer, so
+ * xa_is_value() tells it apart from a record number.
+ */
+static int inflight;
+#define INFLIGHT	((void *)&inflight)
 
 static uint64_t rec_off(const struct vbd *v, uint64_t rec)
 {
@@ -319,6 +328,8 @@ struct vbd *vbd_open(const char *log_path)
 		return NULL;
 	log_init(&v->data);
 	log_init(&v->cache);
+	pthread_mutex_init(&v->fetch_lock, NULL);
+	pthread_cond_init(&v->fetch_done, NULL);
 
 	if ((err = log_open(&v->data, log_path, &sb)))
 		goto fail;
@@ -363,6 +374,8 @@ void vbd_close(struct vbd *v)
 	log_close(&v->cache);
 	if (v->base)
 		v->base_ops->close(v->base);
+	pthread_mutex_destroy(&v->fetch_lock);
+	pthread_cond_destroy(&v->fetch_done);
 	free(v);
 }
 
@@ -373,29 +386,45 @@ int vbd_base_err(const struct vbd *v)		{ return v->base_err; }
 
 /*
  * Bring @chunk of the base into the cache and copy @len bytes of it, from
- * @within, into @buf.
- *
- * ponytail: two readers missing the same chunk both fetch it and append two
- * records; the second store wins and the first becomes garbage. An
- * in-flight mark on the cache map would let the second wait instead.
+ * @within, into @buf. Only one thread fetches a given chunk: it marks the
+ * chunk INFLIGHT in the cache map first, and later arrivals wait for the
+ * mark to turn into a record (then read it) or vanish (then fetch).
  */
 static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		       uint32_t within, uint32_t len)
 {
 	uint8_t *tmp;
-	int ret;
+	void *e;
+	int ret = 0;
 
 	if (!v->base)
 		return v->base_err;	/* offline: nothing to fetch from */
+
+	pthread_mutex_lock(&v->fetch_lock);
+	while ((e = xa_load(&v->cache.map, chunk)) == INFLIGHT)
+		pthread_cond_wait(&v->fetch_done, &v->fetch_lock);
+	if (!e)
+		ret = xa_err(xa_store(&v->cache.map, chunk, INFLIGHT, GFP_KERNEL));
+	pthread_mutex_unlock(&v->fetch_lock);
+	if (e)
+		return log_read(v, &v->cache, xa_to_value(e), buf, within, len);
+	if (ret)
+		return ret;
+
 	tmp = malloc(v->chunk_size);
-	if (!tmp)
-		return -ENOMEM;
-	ret = v->base_ops->read(v->base, chunk * v->chunk_size, tmp, v->chunk_size);
+	ret = tmp ? v->base_ops->read(v->base, chunk * v->chunk_size, tmp, v->chunk_size)
+		  : -ENOMEM;
 	if (!ret)
-		ret = log_append(v, &v->cache, chunk, tmp);
+		ret = log_append(v, &v->cache, chunk, tmp);	/* replaces the mark */
 	if (!ret)
 		memcpy(buf, tmp + within, len);
 	free(tmp);
+
+	pthread_mutex_lock(&v->fetch_lock);
+	if (ret)
+		xa_erase(&v->cache.map, chunk);	/* let the next reader try */
+	pthread_cond_broadcast(&v->fetch_done);
+	pthread_mutex_unlock(&v->fetch_lock);
 	return ret;
 }
 
@@ -412,9 +441,9 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		return 0;
 	}
 	e = xa_load(&v->cache.map, chunk);
-	if (e)
+	if (e && xa_is_value(e))
 		return log_read(v, &v->cache, xa_to_value(e), buf, within, len);
-	return fetch_chunk(v, chunk, buf, within, len);
+	return fetch_chunk(v, chunk, buf, within, len);	/* miss, or INFLIGHT */
 }
 
 /* Cut @len at the end of the volume. */

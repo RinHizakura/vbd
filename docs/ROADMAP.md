@@ -57,11 +57,12 @@ Done:
 - Offline open: a base that cannot be probed leaves the volume open with
   `vbd_base_err` set; cached chunks read, misses return that error. Only a
   base that answers and has changed is refused.
+- Concurrent misses on one chunk fetch it once: the first reader stores an
+  INFLIGHT pointer entry in the cache map, the others wait on a condition
+  variable until it becomes a record number.
 
 Remaining:
 
-- in-flight mark on the cache map so concurrent misses on one chunk fetch
-  once
 - background prefetcher uses `xa_find` to fill holes near recent reads
 - verify every fetched chunk against a manifest hash before caching
 - test: mount a raw image over HTTP, `fsck` it, confirm only a small
