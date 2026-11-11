@@ -116,7 +116,10 @@ base_ops` (`src/base/base.h`). The backend is picked from the name given to
  | magic | crc   | chunk | epoch | pad      | data: exactly chunk_size bytes     |
  | u32   | u32   | u64   | u64   | 40 B     |                                    |
  +-------+-------+-------+-------+----------+------------------------------------+
-           ^ crc covers the data               epoch: reserved for P3, 0 today
+           ^ crc covers the data               epoch: snapshots taken before this write
+
+ A snapshot appends a record with chunk = 2^64 - 1 and the new epoch; it
+ persists the epoch and is never entered in the map.
 ```
 
 A record always carries a whole chunk, even for a one-byte write. That costs

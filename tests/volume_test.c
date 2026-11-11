@@ -319,6 +319,45 @@ static void test_concurrent_fetch(void)
 	teardown(v);
 }
 
+/* Header fields of record @n, read straight from the log file. */
+static void rec_hdr(uint64_t n, uint64_t *chunk, uint64_t *epoch)
+{
+	int fd = open(log_path, O_RDONLY);
+	off_t off = SUPER_SIZE + n * (64 + CHUNK);
+
+	assert(fd >= 0);
+	assert(pread(fd, chunk, 8, off + 8) == 8);	/* after magic, crc */
+	assert(pread(fd, epoch, 8, off + 16) == 8);
+	close(fd);
+}
+
+static void test_snapshot(void)
+{
+	struct vbd *v = setup();
+	uint64_t chunk, epoch;
+
+	assert(vbd_epoch(v) == 0);
+	fill_random(buf, CHUNK);
+	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);		/* rec 0: chunk 0 @0 */
+	assert(vbd_snapshot(v) == 0);				/* rec 1: marker @1 */
+	assert(vbd_epoch(v) == 1);
+	fill_random(buf, CHUNK);
+	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);		/* rec 2: chunk 0 @1 */
+	memcpy(ref, buf, CHUNK);
+	assert(vbd_snapshot(v) == 0);				/* rec 3: marker @2 */
+	assert(vbd_snapshot(v) == 0);				/* rec 4: marker @3 */
+
+	v = reopen(v);						/* epoch survives, markers stay out of the map */
+	assert(vbd_epoch(v) == 3);
+	check_all(v);
+	rec_hdr(0, &chunk, &epoch); assert(chunk == 0 && epoch == 0);
+	rec_hdr(1, &chunk, &epoch); assert(chunk == UINT64_MAX && epoch == 1);
+	rec_hdr(2, &chunk, &epoch); assert(chunk == 0 && epoch == 1);
+	rec_hdr(3, &chunk, &epoch); assert(chunk == UINT64_MAX && epoch == 2);
+	rec_hdr(4, &chunk, &epoch); assert(chunk == UINT64_MAX && epoch == 3);
+	teardown(v);
+}
+
 #define RUN(t)	do { t(); puts("  " #t); } while (0)
 
 int main(void)
@@ -337,6 +376,7 @@ int main(void)
 	RUN(test_stale_base);
 	RUN(test_offline_base);
 	RUN(test_concurrent_fetch);
+	RUN(test_snapshot);
 
 	rcu_barrier();
 	rcu_unregister_thread();

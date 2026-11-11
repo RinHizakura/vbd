@@ -58,16 +58,26 @@ struct rec_hdr {
 	uint32_t magic;
 	uint32_t crc;		/* crc32c of the data that follows */
 	uint64_t chunk;
-	uint64_t epoch;		/* reserved for snapshots; always 0 for now */
+	uint64_t epoch;		/* snapshots taken before this record was written */
 	uint8_t  pad[HDR_SIZE - 24];
 };
 
 /* An append-only file of records plus the map that indexes it. */
+/*
+ * A snapshot appends a record with this chunk number. It carries the new
+ * epoch and no data, and is never stored in the map.
+ *
+ * ponytail: the marker costs a whole chunk of zeros, because every record has
+ * the same size; a header-only marker would need variable-size records.
+ */
+#define SNAP_MARK	UINT64_MAX
+
 struct log {
 	int fd;
 	uint64_t nrec;		/* records in the file; next append goes here */
 	struct xarray map;	/* chunk -> xa_mk_value(record number) */
 	pthread_mutex_t append_lock;
+	uint64_t epoch;		/* what new records are stamped with; 0 for the cache */
 };
 
 struct vbd {
@@ -239,9 +249,14 @@ static int log_replay(struct vbd *v, struct log *l)
 		if ((ret = full_pread(l->fd, &h, sizeof(h), off)) ||
 		    (ret = full_pread(l->fd, data, v->chunk_size, off + HDR_SIZE)))
 			goto out;
-		if (h.magic != VBD_MAGIC || h.chunk >= v->size / v->chunk_size ||
+		if (h.magic != VBD_MAGIC ||
+		    (h.chunk >= v->size / v->chunk_size && h.chunk != SNAP_MARK) ||
 		    h.crc != crc32c(0, data, v->chunk_size))
 			break;		/* torn tail */
+		if (h.epoch > l->epoch)
+			l->epoch = h.epoch;
+		if (h.chunk == SNAP_MARK)
+			continue;
 		ret = xa_err(xa_store(&l->map, h.chunk, xa_mk_value(l->nrec), GFP_KERNEL));
 		if (ret)
 			goto out;
@@ -268,12 +283,14 @@ static int log_append(struct vbd *v, struct log *l, uint64_t chunk, const uint8_
 
 	pthread_mutex_lock(&l->append_lock);
 	rec = l->nrec;
+	h.epoch = l->epoch;
 	if (pwritev(l->fd, iov, 2, rec_off(v, rec)) != (ssize_t)v->rec_size) {
 		ret = -errno;
 		goto out;
 	}
 	/* data is on its way to the file before anyone can find the record */
-	ret = xa_err(xa_store(&l->map, chunk, xa_mk_value(rec), GFP_KERNEL));
+	if (chunk != SNAP_MARK)
+		ret = xa_err(xa_store(&l->map, chunk, xa_mk_value(rec), GFP_KERNEL));
 	if (!ret)
 		l->nrec++;
 out:
@@ -524,4 +541,27 @@ int vbd_flush(struct vbd *v)
 {
 	/* the cache can always be refetched; only the data log needs to last */
 	return fdatasync(v->data.fd) ? -errno : 0;
+}
+
+uint64_t vbd_epoch(const struct vbd *v)		{ return v->data.epoch; }
+
+int vbd_snapshot(struct vbd *v)
+{
+	struct log *l = &v->data;
+	uint8_t *zero = calloc(1, v->chunk_size);
+	int ret;
+
+	if (!zero)
+		return -ENOMEM;
+	/*
+	 * Bump first, then persist the bump with a marker. A write that slips
+	 * in between already carries the new epoch, so its position relative
+	 * to the marker does not matter: replay takes the largest epoch seen.
+	 */
+	pthread_mutex_lock(&l->append_lock);
+	l->epoch++;
+	pthread_mutex_unlock(&l->append_lock);
+	ret = log_append(v, l, SNAP_MARK, zero);
+	free(zero);
+	return ret ? ret : vbd_flush(v);
 }

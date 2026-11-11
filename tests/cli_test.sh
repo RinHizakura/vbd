@@ -23,12 +23,13 @@ head -c 1M /dev/zero > zero.img
 "$VBD" create t.log 2M 4K base.img
 [ "$("$VBD" info t.log)" = "size 2097152
 chunk 4096
+epoch 0
 fetched 0" ] || fail info
 
 # first MiB falls through to the base, second MiB was never written
 "$VBD" read t.log 0 1M | cmp -s - base.img || fail base passthrough
 "$VBD" read t.log 1M 1M | cmp -s - zero.img || fail zero fill
-[ "$("$VBD" info t.log | sed -n 3p)" = "fetched 256" ] || fail "cache holds the base half only"
+[ "$("$VBD" info t.log | sed -n 4p)" = "fetched 256" ] || fail "cache holds the base half only"
 [ -f t.log.cache ] || fail "cache file"
 
 # unaligned write across two chunks
@@ -36,6 +37,13 @@ printf 'hello vbd' | "$VBD" write t.log 4090
 { head -c 4090 base.img; printf 'hello vbd'; tail -c +4100 base.img; } > expect.img
 "$VBD" read t.log 0 1M | cmp -s - expect.img || fail read-modify-write
 [ "$(stat -c %s t.log)" -eq $((4096 + 2 * (64 + 4096))) ] || fail "log holds two records"
+
+# a snapshot is one more record and advances the epoch across reopens
+[ "$("$VBD" snapshot t.log)" = 0 ] || fail "first snapshot is number 0"
+[ "$("$VBD" snapshot t.log)" = 1 ] || fail "second snapshot is number 1"
+[ "$("$VBD" info t.log | sed -n 3p)" = "epoch 2" ] || fail "epoch after two snapshots"
+[ "$(stat -c %s t.log)" -eq $((4096 + 4 * (64 + 4096))) ] || fail "log holds four records"
+"$VBD" read t.log 0 1M | cmp -s - expect.img || fail "content unchanged by snapshots"
 
 # the write survives a reopen
 "$VBD" read t.log 4090 9 | cmp -s - <<'EOT' || fail reopen

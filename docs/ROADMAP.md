@@ -70,10 +70,21 @@ Remaining:
 
 ## P3: branches and time travel
 
+Done:
+
+- Epochs: every record is stamped with the epoch it was written in;
+  `vbd_snapshot` bumps it and appends a marker record (chunk `UINT64_MAX`)
+  so the bump survives a reopen with no further writes. Replay takes the
+  largest epoch it sees. `vbd snapshot` prints the frozen number, `vbd info`
+  the current epoch.
+
+Remaining:
+
 - `fork(parent, name)`: new directory, empty XArray, parent pointer; parent
   is frozen at its current epoch
 - lookup walks the branch chain before falling back to the base cache
-- epochs advance on `snapshot` or a timer; manifest records epoch -> time
+- `at(epoch)`: open read-only, replaying only records with epoch <= N
+- a timer that snapshots periodically; manifest records epoch -> time
 - `at(branch, time)`: load the newest checkpoint at or before the time,
   replay the log up to that epoch, expose the result as a read-only branch
 - test: write, snapshot, write again, then check that `at` returns the

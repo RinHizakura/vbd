@@ -12,6 +12,8 @@
  * with the error that reaching the base gave.
  * Every write appends a whole chunk to the log; the XArray maps chunk
  * index -> log record, so the newest record for a chunk always wins.
+ * Each record is stamped with the volume's epoch, the number of snapshots
+ * taken so far; vbd_snapshot advances it.
  *
  * Threads that call into vbd must have called rcu_register_thread().
  * Functions return 0 or a negative errno unless stated otherwise.
@@ -55,5 +57,14 @@ ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off);
 
 /* Make every completed write durable. */
 int vbd_flush(struct vbd *v);
+
+/*
+ * The epoch new writes are stamped with. Snapshot N froze the content as of
+ * epoch N; writes made since belong to epoch N + 1.
+ */
+uint64_t vbd_epoch(const struct vbd *v);
+
+/* Freeze the current content as a snapshot and advance the epoch. Flushes. */
+int vbd_snapshot(struct vbd *v);
 
 #endif /* VBD_H */

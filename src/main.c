@@ -15,9 +15,10 @@
 static const char *usage_text =
 	"usage: vbd <command> <log> ...\n"
 	"  create <log> <size> <chunk> [base]  new volume; sizes take K, M, G suffixes\n"
-	"  info   <log>                        print size, chunk size, chunks fetched, base state\n"
+	"  info   <log>                        print size, chunk size, epoch, chunks fetched, base state\n"
 	"  read   <log> <off> <len>            copy a range to stdout\n"
-	"  write  <log> <off>                  copy stdin to the volume and flush\n";
+	"  write  <log> <off>                  copy stdin to the volume and flush\n"
+	"  snapshot <log>                      freeze the current content; prints the snapshot number\n";
 
 static int usage(void)
 {
@@ -63,8 +64,8 @@ static int cmd_create(const char *log, const char *size_s, const char *chunk_s,
 
 static int cmd_info(struct vbd *v)
 {
-	printf("size %" PRIu64 "\nchunk %" PRIu32 "\nfetched %" PRIu64 "\n",
-	       vbd_size(v), vbd_chunk_size(v), vbd_fetched(v));
+	printf("size %" PRIu64 "\nchunk %" PRIu32 "\nepoch %" PRIu64 "\nfetched %" PRIu64 "\n",
+	       vbd_size(v), vbd_chunk_size(v), vbd_epoch(v), vbd_fetched(v));
 	if (vbd_base_err(v))
 		printf("base offline: %s\n", strerror(-vbd_base_err(v)));
 	return 0;
@@ -93,6 +94,19 @@ static int cmd_read(struct vbd *v, uint64_t off, uint64_t len)
 		off += got; len -= got;
 	}
 	free(buf);
+	return 0;
+}
+
+static int cmd_snapshot(struct vbd *v)
+{
+	uint64_t frozen = vbd_epoch(v);
+	int ret = vbd_snapshot(v);
+
+	if (ret) {
+		fprintf(stderr, "vbd snapshot: %s\n", strerror(-ret));
+		return 1;
+	}
+	printf("%" PRIu64 "\n", frozen);
 	return 0;
 }
 
@@ -146,7 +160,7 @@ int main(int argc, char **argv)
 		return cmd_create(log, argv[1], argv[2], argc == 4 ? argv[3] : NULL);
 	}
 
-	if (!strcmp(cmd, "info")) {
+	if (!strcmp(cmd, "info") || !strcmp(cmd, "snapshot")) {
 		if (argc != 1)
 			return usage();
 	} else if (!strcmp(cmd, "read")) {
@@ -169,6 +183,8 @@ int main(int argc, char **argv)
 		ret = cmd_info(v);
 	else if (!strcmp(cmd, "read"))
 		ret = cmd_read(v, off, len);
+	else if (!strcmp(cmd, "snapshot"))
+		ret = cmd_snapshot(v);
 	else
 		ret = cmd_write(v, off);
 	vbd_close(v);
