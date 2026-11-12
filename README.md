@@ -9,8 +9,8 @@ It ships in three parts:
 
 | Part | What it is | Status |
 |---|---|---|
-| `vbd` server | exposes a volume as `/dev/ublkbN` through ublk | planned (P4) |
-| `vbd` CLI | creates, inspects, reads and writes volumes from the shell; the front end until the server exists, and the scripting tool afterwards | built |
+| `vbd serve` | exposes a volume as `/dev/ublkbN` through ublk | built |
+| `vbd` CLI | creates, inspects, reads and writes volumes from the shell; the scripting tool | built |
 | `libvbd` | the engine both of them call; usable on its own, but the API is shaped by the server's needs, not for general embedding | built |
 
 The engine is built on the Linux kernel's **XArray**, compiled unmodified for
@@ -34,8 +34,13 @@ reclaimed.
 
 ## Build
 
-Requires `liburcu-dev` and `libcurl4-openssl-dev`. The tests also use
-`busybox` for a local HTTP server.
+Requires `liburcu-dev` and `libcurl4-openssl-dev`; liburing and the XArray
+come in as submodules. Serving a block device needs the kernel's ublk
+driver, `CONFIG_BLK_DEV_UBLK` (`modprobe ublk_drv`), which mainstream
+distributions have shipped as a module since Linux 6.0.
+
+The tests also use `busybox` for a local HTTP server, and `sudo -n` plus
+`mkfs.ext4` for the block device test; both are skipped when unavailable.
 
 ```sh
 git submodule update --init
@@ -63,7 +68,12 @@ vbd read disk.log 0 4K                # range to stdout
 printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 vbd snapshot disk.log                 # freeze the current content; prints the snapshot number
 vbd read disk.log 0 4K 0              # the same range as it was at snapshot 0
+sudo vbd serve disk.log               # prints /dev/ublkbN; Ctrl-C removes it again
+sudo vbd serve disk.log 0             # a read-only device showing snapshot 0
 ```
+
+The served device is an ordinary block device: `mkfs`, `mount`, `dd`, a VM
+all work on it. Flushes go to disk before they are acknowledged.
 
 Snapshots are numbered from 0 and cost one chunk of log space each. Reading
 as of a snapshot never changes the volume.

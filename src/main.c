@@ -11,6 +11,8 @@
 
 #include <vbd.h>
 
+#include "ublk/ublk.h"
+
 #define BUF_SIZE	(1 << 20)
 
 static const char *usage_text =
@@ -19,7 +21,8 @@ static const char *usage_text =
 	"  info   <log> [snapshot]             print size, chunk size, epoch, chunks fetched, base state\n"
 	"  read   <log> <off> <len> [snapshot] copy a range to stdout, as of a snapshot if given\n"
 	"  write  <log> <off>                  copy stdin to the volume and flush\n"
-	"  snapshot <log>                      freeze the current content; prints the snapshot number\n";
+	"  snapshot <log>                      freeze the current content; prints the snapshot number\n"
+	"  serve  <log> [snapshot]             expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root\n";
 
 static int usage(void)
 {
@@ -111,6 +114,17 @@ static int cmd_snapshot(struct vbd *v)
 	return 0;
 }
 
+static int cmd_serve(struct vbd *v, bool readonly)
+{
+	int ret = ublk_serve(v, readonly);
+
+	if (ret) {
+		fprintf(stderr, "vbd serve: %s\n", strerror(-ret));
+		return 1;
+	}
+	return 0;
+}
+
 static int cmd_write(struct vbd *v, uint64_t off)
 {
 	uint8_t *buf = malloc(BUF_SIZE);
@@ -162,7 +176,7 @@ int main(int argc, char **argv)
 		return cmd_create(log, argv[1], argv[2], argc == 4 ? argv[3] : NULL);
 	}
 
-	if (!strcmp(cmd, "info")) {
+	if (!strcmp(cmd, "info") || !strcmp(cmd, "serve")) {
 		have_at = argc == 2;
 		if (argc > 2 || (have_at && parse_size(argv[1], &at)))
 			return usage();
@@ -193,6 +207,8 @@ int main(int argc, char **argv)
 		ret = cmd_read(v, off, len);
 	else if (!strcmp(cmd, "snapshot"))
 		ret = cmd_snapshot(v);
+	else if (!strcmp(cmd, "serve"))
+		ret = cmd_serve(v, have_at);
 	else
 		ret = cmd_write(v, off);
 	vbd_close(v);

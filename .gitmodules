@@ -1,3 +1,6 @@
 [submodule "deps/libxarray"]
 	path = deps/libxarray
 	url = git@github.com:RinHizakura/libxarray.git
+[submodule "deps/liburing"]
+	path = deps/liburing
+	url = https://github.com/axboe/liburing.git

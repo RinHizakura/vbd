@@ -94,10 +94,25 @@ Remaining:
 
 ## P4: ublk front end
 
-- target built on `ublksrv` or `libublk-rs`; one engine queue per ublk queue
-- every queue thread registers with RCU; reads take no lock
-- `mkfs.ext4`, `fio`, boot a VM from the device
-- compare throughput against a loop device over the same base file
+Done:
+
+- `vbd serve` (`src/ublk/server.c`, ~300 lines on liburing, no ublksrv):
+  one queue, one thread, 64 tags, 256 KiB bounce buffer per tag. READ and
+  WRITE map to `vbd_read` / `vbd_write`, FLUSH to `vbd_flush`; the device
+  advertises a volatile cache so flushes arrive. A volume opened at a
+  snapshot is served read-only. SIGINT or SIGTERM stops and deletes the
+  device.
+- `tests/ublk_test.sh`: dd through the device, read-only snapshot device,
+  mkfs.ext4 + mount + fsck across a server restart. Skipped without
+  `sudo -n` or `/dev/ublk-control`.
+
+Remaining:
+
+- one queue per CPU, each with its own thread and ring
+- zero copy or `UBLK_F_USER_COPY` instead of bounce buffers
+- DISCARD and WRITE_ZEROES (a zero record, or a hole in the map)
+- `UBLK_F_USER_RECOVERY`: survive a server restart without unmounting
+- `fio` against a loop device over the same image; boot a VM from the device
 
 ## Open questions
 
