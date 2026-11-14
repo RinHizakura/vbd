@@ -4,36 +4,22 @@
 # request on first read, cached, and never fetched twice. Needs busybox httpd.
 set -eu
 
+NAME="http test"
+. "$(dirname "$0")/lib.sh"
 VBD=$(realpath "${1:-build/vbd}")
 command -v busybox >/dev/null || { echo "http test: skipped (no busybox)"; exit 0; }
 T=$(mktemp -d)
-pid=""
-trap 'test -n "$pid" && kill "$pid" 2>/dev/null; rm -rf "$T"' EXIT
+httpd=""
+trap 'test -n "$httpd" && kill "$httpd" 2>/dev/null; rm -rf "$T"' EXIT
 cd "$T"
 
-fail() { echo "http test: FAIL: $*" >&2; exit 1; }
-expect() {
-	want=$1; shift
-	set +e; "$@" >/dev/null 2>&1; got=$?; set -e
-	[ "$got" -eq "$want" ] || fail "$* exited $got, want $want"
-}
 fetched() { "$VBD" info t.log | sed -n 's/^fetched //p'; }
 
 mkdir www
 head -c 1M /dev/urandom > www/base.img
-port=$(( 20000 + $(od -An -N2 -tu2 /dev/urandom) % 20000 ))
+port=$(free_port)
 url=http://127.0.0.1:$port/base.img
-
-serve() {
-	busybox httpd -f -p 127.0.0.1:$port -h "$T/www" &
-	pid=$!
-	i=0
-	until curl -sfI "$url" >/dev/null; do
-		i=$((i + 1)); [ $i -lt 50 ] || fail "httpd did not come up"
-		sleep 0.1
-	done
-}
-serve
+start_httpd "$T/www" "$port"
 
 expect 1 "$VBD" create u.log 2M 64K "http://127.0.0.1:$port/missing.img"	# 404
 
@@ -55,14 +41,14 @@ printf 'over http' | "$VBD" write t.log 70000
 
 # server down: the volume opens offline; cached chunks read, misses fail
 "$VBD" create v.log 2M 64K "http://127.0.0.1:$port/base.img"	# nothing cached
-kill "$pid"; wait "$pid" 2>/dev/null || true; pid=""
+kill "$httpd"; wait "$httpd" 2>/dev/null || true; httpd=""
 "$VBD" info t.log | grep -q '^base offline' || fail "info should report offline"
 "$VBD" read t.log 0 1M | cmp -s - expect.img || fail "offline read from cache"
 expect 1 "$VBD" read v.log 0 64K
 
 # a base that changed on the server is refused
 touch -d 2000-01-01 www/base.img
-serve
+start_httpd "$T/www" "$port"
 expect 1 "$VBD" read t.log 0 64K
 
 echo "http test: ok"

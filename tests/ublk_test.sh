@@ -4,6 +4,8 @@
 # filesystem that survives a server restart. Needs sudo without a password
 # and the ublk_drv module; skipped otherwise.
 set -eu
+NAME="ublk test"
+. "$(dirname "$0")/lib.sh"
 VBD=$(realpath "$1")
 if ! sudo -n true 2>/dev/null || [ ! -e /dev/ublk-control ]; then
 	echo "ublk test: skipped (needs sudo -n and /dev/ublk-control)"
@@ -17,7 +19,6 @@ cleanup() {
 	rm -rf "$T"
 }
 trap cleanup EXIT
-fail() { echo "ublk test: FAIL: $*" >&2; exit 1; }
 
 # serve <vbd serve args>: start the server; sets $dev, $pid (sudo) and $srv (vbd).
 # Signals go to $srv: sudo does not relay a signal sent from its own process group.

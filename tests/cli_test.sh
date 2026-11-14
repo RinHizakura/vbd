@@ -3,19 +3,12 @@
 # Exercise the vbd command against a small volume with a base image.
 set -eu
 
-VBD=${1:-build/vbd}
-VBD=$(realpath "$VBD")
+NAME="cli test"
+. "$(dirname "$0")/lib.sh"
+VBD=$(realpath "${1:-build/vbd}")
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 cd "$T"
-
-fail() { echo "cli test: FAIL: $*" >&2; exit 1; }
-# expect <status> <cmd...>: run cmd, require the given exit status
-expect() {
-	want=$1; shift
-	set +e; "$@" >/dev/null 2>&1; got=$?; set -e
-	[ "$got" -eq "$want" ] || fail "$* exited $got, want $want"
-}
 
 head -c 1M /dev/urandom > base.img
 head -c 1M /dev/zero > zero.img

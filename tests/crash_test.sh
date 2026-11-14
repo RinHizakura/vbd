@@ -5,7 +5,8 @@
 # that was written whole. A torn write must never show through.
 set -eu
 
-
+NAME="crash test"
+. "$(dirname "$0")/lib.sh"
 VBD=$(realpath "${1:-build/vbd}")
 ROUNDS=${2:-5}
 CHUNK=65536
@@ -13,8 +14,6 @@ N=32			# chunks in the volume
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 cd "$T"
-
-fail() { echo "crash test: FAIL: $*" >&2; exit 1; }
 
 head -c $((CHUNK * N)) /dev/urandom > base.img
 "$VBD" create t.log $((CHUNK * N)) $CHUNK base.img
