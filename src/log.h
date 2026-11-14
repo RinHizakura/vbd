@@ -68,6 +68,9 @@ struct log {
  * Life of a log: init, open, load, then append / read / snapshot / sync as
  * needed, close. close is safe after init at any point.
  */
+/* Create @path holding only the SUPER_SIZE bytes at @super; fails if it exists. */
+int log_create(const char *path, const void *super);
+
 void log_init(struct log *l);
 /* Open @path and copy its first SUPER_SIZE bytes to @super. 0 or -errno. */
 int log_open(struct log *l, const char *path, void *super);

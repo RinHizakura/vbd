@@ -50,6 +50,19 @@ int log_map(struct log *l, uint64_t chunk, uint64_t rec)
 	return 0;
 }
 
+int log_create(const char *path, const void *super)
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+	int ret = 0;
+
+	if (fd < 0)
+		return -errno;
+	if (pwrite(fd, super, SUPER_SIZE, 0) != SUPER_SIZE || fsync(fd))
+		ret = errno ? -errno : -EIO;
+	close(fd);
+	return ret;
+}
+
 void log_init(struct log *l)
 {
 	l->fd = -1;

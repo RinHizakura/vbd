@@ -19,7 +19,7 @@ on the base side exists only when the volume was created with a base image.
  |  libvbd                                               include/vbd.h  |
  |  vbd_create  vbd_open  vbd_close  vbd_read  vbd_write  vbd_flush     |
  +----------------------------------------------------------------------+
- |  engine                                src/volume.c  log.c  ckpt.c   |
+ |  engine                       src/volume.c  cache.c  log.c  ckpt.c   |
  |                                                                      |
  |  always                         . . only if created with a base . .  |
  |  +---------------------------+  .                                 .  |
@@ -28,7 +28,7 @@ on the base side exists only when the volume was created with a base image.
  |  |  file: disk.log           |  .  |  XArray: chunk -> rec no. |  .  |
  |  +---------------------------+  .  |  file: disk.log.cache     |  .  |
  |                                 .  +-------------+-------------+  .  |
- |  a read looks in the data log,  .           miss | fetch_chunk    .  |
+ |  a read looks in the data log,  .           miss | fetch          .  |
  |  then the base cache; with no   .                v                .  |
  |  base an unwritten chunk reads  .  +---------------------------+  .  |
  |  as zeros                       .  |  base_ops src/base/base.h |  .  |
@@ -56,7 +56,10 @@ consumer: the CLI, the tests and the ublk server. The engine has no
 knowledge of what sits above it; the server is one queue thread that turns
 block requests into vbd_read and vbd_write calls.
 
-The base is reached only from `fetch_chunk`, and only through `struct
+Everything on the dotted side is the base cache (`src/cache.c`). The volume
+asks it for any chunk the data log does not have and gets the base's
+content, or zeros past the end of the base or when there is no base. The
+base is reached only from there, and only through `struct
 base_ops` (`src/base/base.h`). The backend is picked from the name given to
 `create`; the engine never knows which one it got, and never needs to.
 
@@ -78,14 +81,14 @@ base_ops` (`src/base/base.h`). The backend is picked from the name given to
  |      (chunk 1..4: empty)   |
  |                            |
  |  . . . . . . . . . . . . . |             base.img or URL  (immutable)
- |  . base_ops, base  . . . . + . . . . . .>+-----+-----+-----+-----+-----+--
- |  . base_size             . |             | c0  | c1  | c2  | c3  | c4  | ...
- |  .                       . |             +-----+-----+-----+-----+-----+--
- |  . cache (struct log)    . |             0     C     2C    3C    4C      C = chunk_size
+ |  . cache (struct cache)  . + . . . . . .>+-----+-----+-----+-----+-----+--
+ |  .   base_ops, base      . |             | c0  | c1  | c2  | c3  | c4  | ...
+ |  .   base_size           . |             +-----+-----+-----+-----+-----+--
+ |  .   log (struct log)    . |             0     C     2C    3C    4C      C = chunk_size
  |  .   same shape as data  . + . . . . . .> disk.log.cache, same layout as disk.log
  |  . . . . . . . . . . . . . |
  +----------------------------+
-    dotted: NULL and unused when the volume was created without a base
+    dotted: no base and no file when the volume was created without a base
 ```
 
 - The map holds the **newest** record for each written chunk. Chunk 5 was
@@ -96,7 +99,7 @@ base_ops` (`src/base/base.h`). The backend is picked from the name given to
   `n` as an XArray value entry; no per-chunk allocation.
 - Chunks never written (1..4) have no entry. Without a base they read as
   zeros. With a base, reads of them go to the base cache, and on a miss
-  there, to the base image. The cache is a second `struct log` over
+  there, to the base image. The cache holds a second `struct log` over
   `disk.log.cache` with exactly this layout.
 
 ## The ublk front end

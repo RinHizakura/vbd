@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * The volume: two record logs (log.h) and a base image.
+ * The volume: a data log (log.h) over a base cache (cache.h).
  *
- * disk.log        every chunk the volume was written with
- * disk.log.cache  every base chunk fetched so far (only with a base image)
+ * disk.log  every chunk the volume was written with
  *
- * A read looks in the data log, then in the cache, then fetches from the
- * base into the cache; with no base an unwritten chunk reads as zeros.
+ * A read looks in the data log; what the volume never wrote comes from the
+ * base cache.
  *
- * The super block in front of both files names the base image (a local path
+ * The super block in front of the log names the base image (a local path
  * or an http(s) URL) and remembers its size and a validator from the backend
  * (base/base.h), so a log is never paired with the wrong base by mistake.
  */
 #include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -23,12 +20,12 @@
 
 #include "common.h"
 #include "vbd.h"
+#include "cache.h"
 #include "crc32c.h"
 #include "log.h"
 #include "base/base.h"
 
 #define VBD_VERSION	1
-#define CACHE_SUFFIX	".cache"
 
 struct super {
 	uint32_t crc;		/* crc32c of everything after this field */
@@ -48,20 +45,10 @@ _Static_assert(sizeof(struct super) == SUPER_SIZE, "super block");
 struct vbd {
 	uint64_t size;
 	uint32_t chunk_size;
-	const struct base_ops *base_ops;	/* NULL: all-zero base */
-	void *base;		/* NULL while base_ops is set: base unreachable, offline */
-	int base_err;		/* why the base is unreachable, 0 when it is open */
-	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	uint64_t at;		/* LIVE, or the snapshot this read-only view shows */
 	struct log data;	/* what the volume was written with */
-	struct log cache;	/* base chunks fetched so far; unused without a base */
-	struct xarray fetching;	/* chunks being fetched from the base right now */
-	pthread_mutex_t fetch_lock;	/* guards fetching */
-	pthread_cond_t fetch_done;	/* a fetch finished, fetching may have changed */
+	struct cache *cache;	/* what it holds where it was never written */
 };
-
-/* What vbd.fetching holds for a chunk; only its presence matters. */
-#define FETCHING	xa_mk_value(1)
 
 /* Opened with vbd_open: the newest content, writable. Not a snapshot view. */
 static bool writable(const struct vbd *v)
@@ -84,29 +71,6 @@ static bool super_valid(const struct super *sb)
 	       !sb->base[sizeof(sb->base) - 1];
 }
 
-static char *cache_path(const char *log_path)
-{
-	char *p = malloc(strlen(log_path) + sizeof(CACHE_SUFFIX));
-
-	if (p)
-		strcat(strcpy(p, log_path), CACHE_SUFFIX);
-	return p;
-}
-
-/* Write a fresh file holding only @sb. */
-static int create_file(const char *path, const struct super *sb)
-{
-	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
-	int ret = 0;
-
-	if (fd < 0)
-		return -errno;
-	if (pwrite(fd, sb, sizeof(*sb), 0) != (ssize_t)sizeof(*sb) || fsync(fd))
-		ret = -errno;
-	close(fd);
-	return ret;
-}
-
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path)
 {
@@ -125,68 +89,26 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 			return ret;
 	}
 	sb.crc = super_crc(&sb);
-	ret = create_file(log_path, &sb);
+	ret = log_create(log_path, &sb);
 	if (ret || !base_path)
 		return ret;
-
-	/* the cache is a second log with the same geometry */
-	char *cp = cache_path(log_path);
-
-	if (!cp) {
-		ret = -ENOMEM;
-	} else {
-		ret = create_file(cp, &sb);
-		free(cp);
-	}
+	ret = cache_create(log_path, &sb);
 	if (ret)
 		unlink(log_path);
 	return ret;
 }
 
-/* Open the base named in the super block and check it is unchanged. */
-/*
- * Bind the base named in the super block. A base that cannot be reached
- * leaves the volume open offline: cached chunks still read, a miss returns
- * the error seen here. A base that changed is refused with -ESTALE, since
- * the cache may then be wrong.
- */
-static int open_base(struct vbd *v, const struct super *sb)
-{
-	char stored[sizeof(sb->base)], tag[BASE_TAG_LEN];
-	uint64_t size;
-	int ret;
-
-	if (!sb->base[0])
-		return 0;
-	v->base_ops = base_ops_for(sb->base);
-	v->base_size = sb->base_size;
-	ret = v->base_ops->probe(sb->base, stored, sizeof(stored), &size, tag, sizeof(tag));
-	if (ret) {
-		v->base_err = ret;
-		return 0;
-	}
-	if (size != sb->base_size || strcmp(tag, sb->base_tag))
-		return -ESTALE;
-	v->base = v->base_ops->open(sb->base);
-	if (!v->base)
-		v->base_err = -errno;
-	return 0;
-}
-
 struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
-	struct super sb, csb;
+	struct super sb;
+	uint64_t nchunks;
 	int err;
 
 	if (!v)
 		return NULL;
 	v->at = snapshot;
 	log_init(&v->data);
-	log_init(&v->cache);
-	xa_init(&v->fetching);
-	pthread_mutex_init(&v->fetch_lock, NULL);
-	pthread_cond_init(&v->fetch_done, NULL);
 
 	if ((err = log_open(&v->data, log_path, &sb)))
 		goto fail;
@@ -196,35 +118,19 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 	}
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
-	if ((err = open_base(v, &sb)))
+	nchunks = sb.size / sb.chunk_size;
+	/* before the data log is touched: a base that changed refuses the open */
+	v->cache = cache_open(log_path, &sb, sb.base, sb.base_size, sb.base_tag,
+			      sb.chunk_size, nchunks);
+	if (!v->cache) {
+		err = -errno;
 		goto fail;
-	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, v->at)))
+	}
+	if ((err = log_load(&v->data, sb.chunk_size, nchunks, v->at)))
 		goto fail;
 	if (!writable(v) && v->at >= v->data.epoch) {
 		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
 		goto fail;
-	}
-
-	if (v->base_ops) {
-		char *cp = cache_path(log_path);
-
-		if (!cp) {
-			err = -ENOMEM;
-			goto fail;
-		}
-		err = log_open(&v->cache, cp, &csb);
-		free(cp);
-		if (err)
-			goto fail;
-		if (!super_valid(&csb) || csb.size != sb.size ||
-		    csb.chunk_size != sb.chunk_size) {
-			err = -EINVAL;
-			goto fail;
-		}
-		/* the base has no history: whatever snapshot is shown, all of the cache counts */
-		if ((err = log_load(&v->cache, sb.chunk_size, sb.size / sb.chunk_size,
-				    ALL_EPOCHS)))
-			goto fail;
 	}
 	return v;
 fail:
@@ -243,63 +149,14 @@ void vbd_close(struct vbd *v)
 	if (!v)
 		return;
 	log_close(&v->data);
-	log_close(&v->cache);
-	xa_destroy(&v->fetching);
-	if (v->base)
-		v->base_ops->close(v->base);
-	pthread_mutex_destroy(&v->fetch_lock);
-	pthread_cond_destroy(&v->fetch_done);
+	cache_close(v->cache);
 	free(v);
 }
 
 uint64_t vbd_size(const struct vbd *v)		{ return v->size; }
 uint32_t vbd_chunk_size(const struct vbd *v)	{ return v->chunk_size; }
-uint64_t vbd_fetched(const struct vbd *v)	{ return v->cache.mapped; }
-int vbd_base_err(const struct vbd *v)		{ return v->base_err; }
-
-/*
- * Bring @chunk of the base into the cache and copy @len bytes of it, from
- * @within, into @buf. Only one thread fetches a given chunk: it enters the
- * chunk in v->fetching first, and later arrivals wait for it to leave, then
- * find the chunk in the cache (and read it) or not (and fetch).
- */
-static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
-		       uint32_t within, uint32_t len)
-{
-	uint8_t *tmp;
-	void *e;
-	int ret = 0;
-
-	if (!v->base)
-		return v->base_err;	/* offline: nothing to fetch from */
-
-	pthread_mutex_lock(&v->fetch_lock);
-	while (xa_load(&v->fetching, chunk))
-		pthread_cond_wait(&v->fetch_done, &v->fetch_lock);
-	e = xa_load(&v->cache.map, chunk);
-	if (!e)
-		ret = xa_err(xa_store(&v->fetching, chunk, FETCHING, GFP_KERNEL));
-	pthread_mutex_unlock(&v->fetch_lock);
-	if (e)
-		return log_read(&v->cache, xa_to_value(e), buf, within, len);
-	if (ret)
-		return ret;
-
-	tmp = malloc(v->chunk_size);
-	ret = tmp ? v->base_ops->read(v->base, chunk * v->chunk_size, tmp, v->chunk_size)
-		  : -ENOMEM;
-	if (!ret)
-		ret = log_append(&v->cache, chunk, tmp);
-	if (!ret)
-		memcpy(buf, tmp + within, len);
-	free(tmp);
-
-	pthread_mutex_lock(&v->fetch_lock);
-	xa_erase(&v->fetching, chunk);	/* in the cache now, or the next reader tries */
-	pthread_cond_broadcast(&v->fetch_done);
-	pthread_mutex_unlock(&v->fetch_lock);
-	return ret;
-}
+uint64_t vbd_fetched(const struct vbd *v)	{ return cache_fetched(v->cache); }
+int vbd_base_err(const struct vbd *v)		{ return cache_err(v->cache); }
 
 /* Read @len bytes of chunk @chunk starting @within bytes into it. */
 static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
@@ -309,14 +166,7 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 
 	if (e)
 		return log_read(&v->data, xa_to_value(e), buf, within, len);
-	if (!v->base_ops || chunk * v->chunk_size >= v->base_size) {
-		memset(buf, 0, len);	/* no base, or past its end: nothing to fetch */
-		return 0;
-	}
-	e = xa_load(&v->cache.map, chunk);
-	if (e)
-		return log_read(&v->cache, xa_to_value(e), buf, within, len);
-	return fetch_chunk(v, chunk, buf, within, len);
+	return cache_read(v->cache, chunk, buf, within, len);
 }
 
 /* Cut @len at the end of the volume. */
