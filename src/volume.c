@@ -57,16 +57,13 @@ struct vbd {
 	uint64_t at;		/* LIVE, or the snapshot this read-only view shows */
 	struct log data;	/* what the volume was written with */
 	struct log cache;	/* base chunks fetched so far; unused without a base */
-	pthread_mutex_t fetch_lock;	/* guards INFLIGHT marks in cache.map */
-	pthread_cond_t fetch_done;	/* a fetch finished, marks may have changed */
+	struct xarray fetching;	/* chunks being fetched from the base right now */
+	pthread_mutex_t fetch_lock;	/* guards fetching */
+	pthread_cond_t fetch_done;	/* a fetch finished, fetching may have changed */
 };
 
-/*
- * Cache map entry for a chunk being fetched right now. A pointer, so
- * xa_is_value() tells it apart from a record number.
- */
-static int inflight;
-#define INFLIGHT	((void *)&inflight)
+/* What vbd.fetching holds for a chunk; only its presence matters. */
+#define FETCHING	xa_mk_value(1)
 
 /* Opened with vbd_open: the newest content, writable. Not a snapshot view. */
 static bool writable(const struct vbd *v)
@@ -188,6 +185,7 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 	v->at = snapshot;
 	log_init(&v->data);
 	log_init(&v->cache);
+	xa_init(&v->fetching);
 	pthread_mutex_init(&v->fetch_lock, NULL);
 	pthread_cond_init(&v->fetch_done, NULL);
 
@@ -253,6 +251,7 @@ void vbd_close(struct vbd *v)
 		ckpt_save(&v->data);
 	log_close(&v->data);
 	log_close(&v->cache);
+	xa_destroy(&v->fetching);
 	if (v->base)
 		v->base_ops->close(v->base);
 	pthread_mutex_destroy(&v->fetch_lock);
@@ -262,14 +261,14 @@ void vbd_close(struct vbd *v)
 
 uint64_t vbd_size(const struct vbd *v)		{ return v->size; }
 uint32_t vbd_chunk_size(const struct vbd *v)	{ return v->chunk_size; }
-uint64_t vbd_fetched(const struct vbd *v)	{ return v->cache.nrec; }
+uint64_t vbd_fetched(const struct vbd *v)	{ return v->cache.mapped; }
 int vbd_base_err(const struct vbd *v)		{ return v->base_err; }
 
 /*
  * Bring @chunk of the base into the cache and copy @len bytes of it, from
- * @within, into @buf. Only one thread fetches a given chunk: it marks the
- * chunk INFLIGHT in the cache map first, and later arrivals wait for the
- * mark to turn into a record (then read it) or vanish (then fetch).
+ * @within, into @buf. Only one thread fetches a given chunk: it enters the
+ * chunk in v->fetching first, and later arrivals wait for it to leave, then
+ * find the chunk in the cache (and read it) or not (and fetch).
  */
 static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		       uint32_t within, uint32_t len)
@@ -282,10 +281,11 @@ static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		return v->base_err;	/* offline: nothing to fetch from */
 
 	pthread_mutex_lock(&v->fetch_lock);
-	while ((e = xa_load(&v->cache.map, chunk)) == INFLIGHT)
+	while (xa_load(&v->fetching, chunk))
 		pthread_cond_wait(&v->fetch_done, &v->fetch_lock);
+	e = xa_load(&v->cache.map, chunk);
 	if (!e)
-		ret = xa_err(xa_store(&v->cache.map, chunk, INFLIGHT, GFP_KERNEL));
+		ret = xa_err(xa_store(&v->fetching, chunk, FETCHING, GFP_KERNEL));
 	pthread_mutex_unlock(&v->fetch_lock);
 	if (e)
 		return log_read(&v->cache, xa_to_value(e), buf, within, len);
@@ -296,14 +296,13 @@ static int fetch_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 	ret = tmp ? v->base_ops->read(v->base, chunk * v->chunk_size, tmp, v->chunk_size)
 		  : -ENOMEM;
 	if (!ret)
-		ret = log_append(&v->cache, chunk, tmp);	/* replaces the mark */
+		ret = log_append(&v->cache, chunk, tmp);
 	if (!ret)
 		memcpy(buf, tmp + within, len);
 	free(tmp);
 
 	pthread_mutex_lock(&v->fetch_lock);
-	if (ret)
-		xa_erase(&v->cache.map, chunk);	/* let the next reader try */
+	xa_erase(&v->fetching, chunk);	/* in the cache now, or the next reader tries */
 	pthread_cond_broadcast(&v->fetch_done);
 	pthread_mutex_unlock(&v->fetch_lock);
 	return ret;
@@ -322,9 +321,9 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		return 0;
 	}
 	e = xa_load(&v->cache.map, chunk);
-	if (e && xa_is_value(e))
+	if (e)
 		return log_read(&v->cache, xa_to_value(e), buf, within, len);
-	return fetch_chunk(v, chunk, buf, within, len);	/* miss, or INFLIGHT */
+	return fetch_chunk(v, chunk, buf, within, len);
 }
 
 /* Cut @len at the end of the volume. */

@@ -46,6 +46,17 @@ int full_pread(int fd, void *buf, size_t len, uint64_t off)
 	return 0;
 }
 
+int log_map(struct log *l, uint64_t chunk, uint64_t rec)
+{
+	void *old = xa_store(&l->map, chunk, xa_mk_value(rec), GFP_KERNEL);
+
+	if (xa_is_err(old))
+		return xa_err(old);
+	if (!old)
+		l->mapped++;
+	return 0;
+}
+
 void log_init(struct log *l)
 {
 	l->fd = -1;
@@ -104,8 +115,7 @@ int log_replay(struct log *l, uint64_t upto)
 			l->epoch = h.epoch;
 		if (h.chunk == SNAP_MARK || h.epoch > upto)
 			continue;	/* marker, or written after the snapshot shown */
-		ret = xa_err(xa_store(&l->map, h.chunk, xa_mk_value(l->nrec), GFP_KERNEL));
-		if (ret)
+		if ((ret = log_map(l, h.chunk, l->nrec)))
 			goto out;
 	}
 	/* drop anything after the last good record so appends start clean */
@@ -140,7 +150,7 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 	ret = rec_write(l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
 	if (!ret && chunk != SNAP_MARK)
-		ret = xa_err(xa_store(&l->map, chunk, xa_mk_value(l->nrec), GFP_KERNEL));
+		ret = log_map(l, chunk, l->nrec);
 	if (!ret)
 		l->nrec++;
 	pthread_mutex_unlock(&l->append_lock);

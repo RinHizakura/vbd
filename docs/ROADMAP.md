@@ -63,9 +63,9 @@ Done:
 - Offline open: a base that cannot be probed leaves the volume open with
   `vbd_base_err` set; cached chunks read, misses return that error. Only a
   base that answers and has changed is refused.
-- Concurrent misses on one chunk fetch it once: the first reader stores an
-  INFLIGHT pointer entry in the cache map, the others wait on a condition
-  variable until it becomes a record number.
+- Concurrent misses on one chunk fetch it once: the first reader enters
+  the chunk in a table of fetches in progress, the others wait on a
+  condition variable until it has left and then find it in the cache.
 
 Remaining:
 

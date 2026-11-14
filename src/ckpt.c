@@ -111,12 +111,13 @@ static bool ckpt_read(struct log *l, uint64_t first, uint32_t parts)
 		     h.crc == crc32c(0, ent, l->chunk_size);
 		for (uint64_t i = 0; ok && i < h.count; i++)
 			ok = ent[2 * i] < l->nchunks && ent[2 * i + 1] < first &&
-			     !xa_err(xa_store(&l->map, ent[2 * i],
-					      xa_mk_value(ent[2 * i + 1]), GFP_KERNEL));
+			     !log_map(l, ent[2 * i], ent[2 * i + 1]);
 	}
 	free(ent);
-	if (!ok)
+	if (!ok) {
 		xa_destroy(&l->map);	/* empty again */
+		l->mapped = 0;
+	}
 	return ok;
 }
 

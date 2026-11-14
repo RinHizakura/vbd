@@ -49,7 +49,8 @@ struct log {
 	uint64_t nrec;		/* records in the file; next append goes here */
 	uint64_t ckpt_nrec;	/* nrec right after the last checkpoint */
 	uint32_t ckpt_parts;	/* records that checkpoint took */
-	struct xarray map;	/* chunk -> xa_mk_value(record number) */
+	struct xarray map;	/* chunk -> xa_mk_value(record number), nothing else */
+	uint64_t mapped;	/* chunks the map holds */
 	pthread_mutex_t append_lock;
 	uint64_t epoch;		/* what new records are stamped with */
 };
@@ -80,6 +81,8 @@ int log_snapshot(struct log *l);
 int log_read(struct log *l, uint64_t rec, uint8_t *buf, uint32_t within, uint32_t len);
 
 /* For code that writes records of its own kind (ckpt.c). */
+/* Point @chunk at record @rec in the map. 0 or -errno. */
+int log_map(struct log *l, uint64_t chunk, uint64_t rec);
 uint64_t rec_off(const struct log *l, uint64_t rec);
 /* Write a header of any kind and @data as record l->nrec; append_lock held. */
 int rec_write(struct log *l, const void *hdr, const void *data);
