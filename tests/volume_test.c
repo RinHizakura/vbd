@@ -101,6 +101,7 @@ static void test_create_errors(void)
 
 	assert(vbd_create(log_path, SIZE, CHUNK, base_path) == -EEXIST);
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 3000, NULL) == -EINVAL);
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 8, NULL) == -EINVAL);	/* under 16 */
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE + 1, CHUNK, NULL) == -EINVAL);
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE, CHUNK, "/nonexistent") == -ENOENT);
 	teardown(v);
@@ -324,42 +325,109 @@ static void test_concurrent_fetch(void)
 	teardown(v);
 }
 
-/* Header fields of record @n, read straight from the log file. */
-static void rec_hdr(uint64_t n, uint64_t *chunk, uint64_t *epoch)
+/* What record @n of the log is, read straight from the file. */
+struct rec_info {
+	uint32_t magic;
+	uint64_t chunk, epoch;		/* data record */
+	uint64_t ckpt_epoch, next_epoch;	/* checkpoint record */
+};
+#define REC_MAGIC	0x31646276u	/* "vbd1", as in log.h */
+#define CKPT_MAGIC	0x6b636276u	/* "vbck" */
+
+static struct rec_info rec_info(uint64_t n)
 {
+	struct rec_info r;
 	int fd = open(log_path, O_RDONLY);
 	off_t off = SUPER_SIZE + n * (64 + CHUNK);
 
 	assert(fd >= 0);
-	assert(pread(fd, chunk, 8, off + 8) == 8);	/* after magic, crc */
-	assert(pread(fd, epoch, 8, off + 16) == 8);
+	assert(pread(fd, &r.magic, 4, off) == 4);
+	assert(pread(fd, &r.chunk, 8, off + 8) == 8);		/* after magic, crc */
+	assert(pread(fd, &r.epoch, 8, off + 16) == 8);
+	assert(pread(fd, &r.ckpt_epoch, 8, off + 8) == 8);
+	assert(pread(fd, &r.next_epoch, 8, off + 32) == 8);	/* after part, parts, count */
 	close(fd);
+	return r;
+}
+
+static void expect_data(uint64_t n, uint64_t chunk, uint64_t epoch)
+{
+	struct rec_info r = rec_info(n);
+
+	assert(r.magic == REC_MAGIC && r.chunk == chunk && r.epoch == epoch);
+}
+
+/* Record @n is the checkpoint of snapshot @snap: it steps the epoch past it. */
+static void expect_snapshot(uint64_t n, uint64_t snap)
+{
+	struct rec_info r = rec_info(n);
+
+	assert(r.magic == CKPT_MAGIC && r.ckpt_epoch == snap && r.next_epoch == snap + 1);
 }
 
 static void test_snapshot(void)
 {
 	struct vbd *v = setup();
-	uint64_t chunk, epoch;
 
 	assert(vbd_epoch(v) == 0);
 	fill_random(buf, CHUNK);
 	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);		/* rec 0: chunk 0 @0 */
-	assert(vbd_snapshot(v) == 0);				/* rec 1: marker @1 */
+	assert(vbd_snapshot(v) == 0);				/* rec 1: snapshot 0 */
 	assert(vbd_epoch(v) == 1);
 	fill_random(buf, CHUNK);
 	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);		/* rec 2: chunk 0 @1 */
 	memcpy(ref, buf, CHUNK);
-	assert(vbd_snapshot(v) == 0);				/* rec 3: marker @2 */
-	assert(vbd_snapshot(v) == 0);				/* rec 4: marker @3 */
+	assert(vbd_snapshot(v) == 0);				/* rec 3: snapshot 1 */
+	assert(vbd_snapshot(v) == 0);				/* rec 4: snapshot 2 */
 
-	v = reopen(v);						/* epoch survives, markers stay out of the map */
+	v = reopen(v);						/* the epoch survives */
 	assert(vbd_epoch(v) == 3);
 	check_all(v);
-	rec_hdr(0, &chunk, &epoch); assert(chunk == 0 && epoch == 0);
-	rec_hdr(1, &chunk, &epoch); assert(chunk == UINT64_MAX && epoch == 1);
-	rec_hdr(2, &chunk, &epoch); assert(chunk == 0 && epoch == 1);
-	rec_hdr(3, &chunk, &epoch); assert(chunk == UINT64_MAX && epoch == 2);
-	rec_hdr(4, &chunk, &epoch); assert(chunk == UINT64_MAX && epoch == 3);
+	expect_data(0, 0, 0);
+	expect_snapshot(1, 0);
+	expect_data(2, 0, 1);
+	expect_snapshot(3, 1);
+	expect_snapshot(4, 2);
+	teardown(v);
+}
+
+/*
+ * A snapshot is a checkpoint: a view of it is loaded from there and reads
+ * no record before it (damage to one goes unnoticed, where a replay would
+ * have stopped at it and found no snapshot), nor any after. A writable open
+ * starts from it too. Before anything is written it is one empty record.
+ */
+static void test_snapshot_checkpoint(void)
+{
+	struct vbd *v = setup();
+	uint8_t a[CHUNK], b[CHUNK], c[CHUNK];
+	struct stat st;
+
+	assert(vbd_snapshot(v) == 0);			/* rec 0: snapshot 0, of nothing */
+	assert(stat(log_path, &st) == 0 && st.st_size == SUPER_SIZE + 64 + CHUNK);
+	fill_random(a, CHUNK); fill_random(b, CHUNK); fill_random(c, CHUNK);
+	assert(vbd_write(v, a, CHUNK, 0) == CHUNK);		/* rec 1 */
+	assert(vbd_write(v, b, CHUNK, CHUNK) == CHUNK);		/* rec 2 */
+	assert(vbd_snapshot(v) == 0);				/* rec 3: snapshot 1 */
+	assert(vbd_write(v, c, CHUNK, 0) == CHUNK);		/* rec 4 */
+	vbd_close(v);
+	expect_snapshot(0, 0);
+	expect_snapshot(3, 1);
+
+	flip_log_bit(SUPER_SIZE + 2 * (64 + CHUNK) - 1);	/* rec 1, chunk 0 as of snapshot 1 */
+	v = vbd_open_at(log_path, 1);
+	assert(v && vbd_epoch(v) == 2);
+	assert(vbd_read(v, buf, CHUNK, CHUNK) == CHUNK && memcmp(buf, b, CHUNK) == 0);
+	vbd_close(v);
+	v = vbd_open_at(log_path, 0);				/* the empty one: base content */
+	assert(v && vbd_epoch(v) == 2);
+	check_all(v);
+	vbd_close(v);
+	assert(vbd_open_at(log_path, 2) == NULL && errno == ENOENT);
+	v = vbd_open(log_path);					/* from snapshot 1, then rec 4 */
+	assert(v && vbd_epoch(v) == 2);
+	assert(vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, c, CHUNK) == 0);
+	assert(vbd_read(v, buf, CHUNK, CHUNK) == CHUNK && memcmp(buf, b, CHUNK) == 0);
 	teardown(v);
 }
 
@@ -554,6 +622,7 @@ int main(void)
 	RUN(test_concurrent_fetch);
 	RUN(test_snapshot);
 	RUN(test_open_at);
+	RUN(test_snapshot_checkpoint);
 	RUN(test_checkpoint);
 	RUN(test_cache_checkpoint);
 

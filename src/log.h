@@ -31,10 +31,12 @@
 
 #include <xarray.h>
 
-#define VBD_MAGIC	0x31646276u	/* "vbd1": super block, data record, snapshot marker */
+#define VBD_MAGIC	0x31646276u	/* "vbd1": super block, data record */
 #define CKPT_MAGIC	0x6b636276u	/* "vbck": checkpoint record */
 #define HDR_SIZE	64
 #define SUPER_SIZE	4096
+/* A record has to hold at least one map entry: checkpoints are made of them. */
+#define MIN_CHUNK_SIZE	16
 
 struct rec_hdr {
 	uint32_t magic;
@@ -88,8 +90,8 @@ void log_close(struct log *l);
 int log_append(struct log *l, uint64_t chunk, const uint8_t *data);
 
 /*
- * Advance the epoch and append a marker record that carries the new one,
- * so the step survives a reopen with no further writes.
+ * Take a snapshot: step the epoch, in a way that survives a reopen with no
+ * further writes, and keep the map as it is now for views of the snapshot.
  */
 int log_snapshot(struct log *l);
 

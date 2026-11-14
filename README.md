@@ -75,8 +75,11 @@ sudo vbd serve disk.log 0             # a read-only device showing snapshot 0
 The served device is an ordinary block device: `mkfs`, `mount`, `dd`, a VM
 all work on it. Flushes go to disk before they are acknowledged.
 
-Snapshots are numbered from 0 and cost one chunk of log space each. Reading
-as of a snapshot never changes the volume.
+Snapshots are numbered from 0. Each one stores the volume's index as it is
+at that moment, 16 bytes per chunk written so far, rounded up to whole
+chunks: one chunk of log space for a small volume. Reading as of a
+snapshot never changes the volume, and does not get slower with how much
+was written before it.
 
 A volume survives a crash of the process writing it: a write that was cut
 short is dropped on the next open, everything before it is kept.

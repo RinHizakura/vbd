@@ -44,7 +44,7 @@ Done:
   four times what the previous checkpoint took, because a checkpoint stays
   in the log for good. Covered records are not checksummed again on open:
   that is the time it saves. The base cache checkpoints the same way, at
-  close only. Not yet: a snapshot view still replays the whole log (P3).
+  close only.
 
 ## P2: lazy fetch
 
@@ -79,13 +79,16 @@ Remaining:
 Done:
 
 - Epochs: every record is stamped with the epoch it was written in;
-  `vbd_snapshot` bumps it and appends a marker record (chunk `UINT64_MAX`)
-  so the bump survives a reopen with no further writes. Replay takes the
-  largest epoch it sees. `vbd snapshot` prints the frozen number, `vbd info`
-  the current epoch.
-- `vbd_open_at(log, N)`: replay skips records with epoch > N and the view
-  is read-only (writes and snapshots return EROFS). `vbd read ... N` and
-  `vbd info ... N` use it.
+  `vbd_snapshot` steps it. `vbd snapshot` prints the frozen number,
+  `vbd info` the current epoch.
+- A snapshot is a checkpoint: `vbd_snapshot` appends the map as it is, in
+  a checkpoint whose header names the next epoch, so the step survives a
+  reopen with no further writes. It costs the size of the map rather than
+  one record of zeros; for a small volume that is still one record. A
+  chunk must be 16 bytes at least, so that a record can hold a map entry.
+- `vbd_open_at(log, N)`: a read-only view (writes and snapshots return
+  EROFS), loaded from the checkpoint snapshot N wrote, without reading any
+  record before or after it. `vbd read ... N` and `vbd info ... N` use it.
 
 Remaining:
 

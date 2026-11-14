@@ -29,7 +29,7 @@ struct vbd;
 
 /*
  * Create an empty log for a volume of @size bytes, split in @chunk_size
- * chunks. @base_path may be NULL for an all-zero base; it is stored as an
+ * chunks: a power of two, 16 at least, that divides @size. @base_path may be NULL for an all-zero base; it is stored as an
  * absolute path.
  */
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,

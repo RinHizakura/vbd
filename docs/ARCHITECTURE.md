@@ -167,19 +167,23 @@ One request, by tag:
  +-------+-------+-------+-------+----------+------------------------------------+
            ^ crc covers the data               epoch: snapshots taken before this write
 
- A snapshot appends a record with chunk = 2^64 - 1 and the new epoch; it
- persists the epoch and is never entered in the map.
-
  checkpoint record (the same size, a header of its own kind)
- +-------+-------+-------+------+-------+-------+------+-----------------------------+
- | magic | crc   | epoch | part | parts | count | pad  | data: count map entries,    |
- | "vbck"| u32   | u64   | u32  | u32   | u64   | 32 B | (chunk, record) as two u64  |
- +-------+-------+-------+------+-------+-------+------+-----------------------------+
+ +-------+-------+-------+------+-------+-------+------------+------+--------------------------+
+ | magic | crc   | epoch | part | parts | count | next_epoch | pad  | data: count map entries, |
+ | "vbck"| u32   | u64   | u32  | u32   | u64   | u64        | 24 B | (chunk, record), two u64 |
+ +-------+-------+-------+------+-------+-------+------------+------+--------------------------+
+           epoch: no record the checkpoint covers has a larger one
+           next_epoch: what records after it are stamped with
 
  Every header is 64 bytes and starts with magic and crc; the magic says how
  to read the rest. A checkpoint is `parts` consecutive checkpoint records
  holding the whole map in chunk order, `count` entries in each. It covers
  every record before its part 0.
+
+ A snapshot is a checkpoint with next_epoch = epoch + 1: it is snapshot
+ number `epoch`, the map it holds is the content that snapshot froze, and
+ it is what makes the step to the next epoch last. Any other checkpoint
+ has next_epoch = epoch.
 ```
 
 A record always carries a whole chunk, even for a one-byte write. That costs
@@ -200,8 +204,22 @@ it is written.
 Open walks the 64-byte headers back from the end of the file until it
 meets the last part of a checkpoint whose parts all verify, loads the map
 from it and replays the records after it. With no checkpoint, or only torn
-ones, it replays from record 0 as before. A snapshot view always replays
-everything, since a checkpoint holds the newest map.
+ones, it replays from record 0 as before.
+
+A view of snapshot N looks for the newest checkpoint with epoch <= N
+instead. Normally that is the one snapshot N wrote, and then nothing is
+replayed at all: the map is the snapshot, every record before it is in the
+map and every record after it is newer. The headers passed on the way
+back tell how far the log has got since.
+
+```
+ view of snapshot 1
+ +-------+-------+-------+----------------+-------+----------------+-------+
+ | super | rec   | rec   | ckpt  epoch 0  | rec   | ckpt  epoch 1  | rec   |
+ |       | @0    | @0    |       next  1  | @1    |       next  2  | @2    |
+ +-------+-------+-------+----------------+-------+----------------+-------+
+          \________ not read ____________________/ \__ loaded ____/  ^ header only
+```
 
 It is written at flush and at close, after an `fdatasync` so that it never
 describes records a power cut can still take, and only when 64 MiB of

@@ -79,7 +79,7 @@ static bool super_valid(const struct super *sb)
 {
 	return sb->magic == VBD_MAGIC && sb->version == VBD_VERSION &&
 	       sb->crc == super_crc(sb) &&
-	       IS_POWER_OF_2(sb->chunk_size) && sb->size &&
+	       IS_POWER_OF_2(sb->chunk_size) && sb->chunk_size >= MIN_CHUNK_SIZE && sb->size &&
 	       IS_ALIGNED(sb->size, sb->chunk_size) &&
 	       !sb->base[sizeof(sb->base) - 1];
 }
@@ -114,7 +114,8 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 			    .chunk_size = chunk_size, .size = size };
 	int ret;
 
-	if (!IS_POWER_OF_2(chunk_size) || !IS_ALIGNED(size, chunk_size))
+	if (!IS_POWER_OF_2(chunk_size) || chunk_size < MIN_CHUNK_SIZE ||
+	    !IS_ALIGNED(size, chunk_size))
 		return -EINVAL;
 	if (base_path) {
 		ret = base_ops_for(base_path)->probe(base_path, sb.base, sizeof(sb.base),

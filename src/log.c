@@ -13,15 +13,6 @@
 #include "crc32c.h"
 #include "log.h"
 
-/*
- * A snapshot appends a record with this chunk number. It carries the new
- * epoch and no data, and is never stored in the map.
- *
- * ponytail: the marker costs a whole chunk of zeros, because every record has
- * the same size; a header-only marker would need variable-size records.
- */
-#define SNAP_MARK	UINT64_MAX
-
 uint64_t rec_off(const struct log *l, uint64_t rec)
 {
 	return SUPER_SIZE + rec * (HDR_SIZE + (uint64_t)l->chunk_size);
@@ -122,13 +113,13 @@ static int log_replay(struct log *l)
 		if ((ret = full_pread(l->fd, data, l->chunk_size, off + HDR_SIZE)))
 			goto out;
 		if (h.magic != VBD_MAGIC ||
-		    (h.chunk >= l->nchunks && h.chunk != SNAP_MARK) ||
+		    h.chunk >= l->nchunks ||
 		    h.crc != crc32c(0, data, l->chunk_size))
 			break;		/* torn tail */
 		if (h.epoch > l->epoch)
 			l->epoch = h.epoch;
-		if (h.chunk == SNAP_MARK || h.epoch > l->upto)
-			continue;	/* marker, or written after the snapshot shown */
+		if (h.epoch > l->upto)
+			continue;	/* written after the snapshot shown */
 		if ((ret = log_map(l, h.chunk, l->nrec)))
 			goto out;
 	}
@@ -147,10 +138,7 @@ int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto
 	l->chunk_size = chunk_size;
 	l->nchunks = nchunks;
 	l->upto = upto;
-	/* a checkpoint is the newest map; a view filters, so it replays it all */
-	if (upto == ALL_EPOCHS)
-		ckpt_load(l);
-	ret = log_replay(l);
+	ret = ckpt_load(l) ? 0 : log_replay(l);
 	l->loaded = !ret;
 	return ret;
 }
@@ -185,7 +173,7 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 	h.epoch = l->epoch;
 	ret = rec_write(l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
-	if (!ret && chunk != SNAP_MARK)
+	if (!ret)
 		ret = log_map(l, chunk, l->nrec);
 	if (!ret)
 		l->nrec++;
@@ -195,22 +183,7 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 
 int log_snapshot(struct log *l)
 {
-	uint8_t *zero = calloc(1, l->chunk_size);
-	int ret;
-
-	if (!zero)
-		return -ENOMEM;
-	/*
-	 * Bump first, then persist the bump with a marker. A write that slips
-	 * in between already carries the new epoch, so its position relative
-	 * to the marker does not matter: replay takes the largest epoch seen.
-	 */
-	pthread_mutex_lock(&l->append_lock);
-	l->epoch++;
-	pthread_mutex_unlock(&l->append_lock);
-	ret = log_append(l, SNAP_MARK, zero);
-	free(zero);
-	return ret;
+	return ckpt_snapshot(l);
 }
 
 int log_read(struct log *l, uint64_t rec, uint8_t *buf, uint32_t within, uint32_t len)
