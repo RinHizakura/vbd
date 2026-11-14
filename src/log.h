@@ -55,7 +55,6 @@ struct log {
 	uint64_t nchunks;	/* chunks are numbered 0 .. nchunks - 1 */
 	uint64_t upto;		/* ALL_EPOCHS, or the last epoch this view of the log shows */
 	bool loaded;		/* log_load finished: the map describes the file */
-	bool shared;		/* other processes append too (log_share) */
 	uint64_t nrec;		/* records in the file; next append goes here */
 	uint64_t ckpt_nrec;	/* nrec right after the last checkpoint */
 	uint32_t ckpt_parts;	/* records that checkpoint took */
@@ -66,8 +65,8 @@ struct log {
 };
 
 /*
- * Life of a log: init, open, lock or share if it is to be written, load,
- * then append / read / snapshot / sync as needed, close. close is safe after
+ * Life of a log: init, open, lock if it is to be written, load, then
+ * append / read / snapshot / sync as needed, close. close is safe after
  * init at any point.
  */
 /* Create @path holding only the SUPER_SIZE bytes at @super; fails if it exists. */
@@ -85,19 +84,6 @@ int log_open(struct log *l, const char *path, void *super);
 int log_lock(struct log *l);
 
 /*
- * Instead of claiming it: let any number of opens append to the log, in
- * this process or others, before loading it. Each takes a file lock for
- * the moment it appends and first reads in what the others appended. A
- * shared log holds one record per chunk: an append for a chunk that
- * someone got in first is dropped, so what is appended for a chunk must be
- * the same whoever appends it.
- */
-void log_share(struct log *l);
-
-/* For a shared log: read in what other opens appended since. 0 or -errno. */
-int log_refresh(struct log *l);
-
-/*
  * Build the map from the file, given the geometry the super block
  * describes. Later records override earlier ones. The first record that
  * does not verify marks a torn tail, and the file is truncated there.
@@ -108,6 +94,14 @@ int log_refresh(struct log *l);
  * while someone else is appending.
  */
 int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto);
+
+/*
+ * Read in the records that another open of the same file appended since
+ * this one loaded or last caught up. The caller keeps every other open from
+ * appending meanwhile, here and for as long as it goes on to append itself:
+ * a log does not look at the file again on its own. 0 or -errno.
+ */
+int log_catch_up(struct log *l);
 
 /* Make every record appended so far durable. */
 int log_sync(struct log *l);
@@ -129,7 +123,7 @@ int log_read(struct log *l, uint64_t rec, uint8_t *buf, uint32_t within, uint32_
 /* Point @chunk at record @rec in the map. 0 or -errno. */
 int log_map(struct log *l, uint64_t chunk, uint64_t rec);
 uint64_t rec_off(const struct log *l, uint64_t rec);
-/* Write a header of any kind and @data as record l->nrec; the log is held. */
+/* Write a header of any kind and @data as record l->nrec; append_lock held. */
 int rec_write(struct log *l, const void *hdr, const void *data);
 /* pread all of it; past the end of the file reads as zeros. 0 or -errno. */
 int full_pread(int fd, void *buf, size_t len, uint64_t off);

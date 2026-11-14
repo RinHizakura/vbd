@@ -2,8 +2,10 @@
 /* The base cache: a log of fetched base chunks in front of a base backend. */
 #include <errno.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 
 #include "cache.h"
 #include "log.h"
@@ -18,6 +20,7 @@ struct cache {
 	int err;		/* why the base is unreachable, 0 when it is open */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	struct log log;		/* base chunks fetched so far */
+	pthread_mutex_t file_lock;	/* one thread of ours at the cache file at a time */
 	struct xarray fetching;	/* chunks being fetched from the base right now */
 	pthread_mutex_t fetch_lock;	/* guards fetching */
 	pthread_cond_t fetch_done;	/* a fetch finished, fetching may have changed */
@@ -33,6 +36,29 @@ static char *cache_path(const char *log_path)
 	if (p)
 		strcat(strcpy(p, log_path), CACHE_SUFFIX);
 	return p;
+}
+
+/*
+ * Get the cache file to ourselves and see what is in it. Other opens of
+ * it, a view in another process say, store what they fetch there too: the
+ * file lock keeps them out, and the log then reads in what they added
+ * since we last had it. Until release, the log's map is the file.
+ *
+ * Returns 0 or -errno; the file is held either way, release it.
+ */
+static int acquire(struct cache *c)
+{
+	pthread_mutex_lock(&c->file_lock);
+	while (flock(c->log.fd, LOCK_EX))
+		if (errno != EINTR)
+			return -errno;
+	return log_catch_up(&c->log);
+}
+
+static void release(struct cache *c)
+{
+	flock(c->log.fd, LOCK_UN);
+	pthread_mutex_unlock(&c->file_lock);
 }
 
 int cache_create(const char *log_path, const void *super)
@@ -86,6 +112,7 @@ struct cache *cache_open(const char *log_path, const void *super,
 	c->chunk_size = chunk_size;
 	log_init(&c->log);
 	xa_init(&c->fetching);
+	pthread_mutex_init(&c->file_lock, NULL);
 	pthread_mutex_init(&c->fetch_lock, NULL);
 	pthread_cond_init(&c->fetch_done, NULL);
 	if (!base[0])
@@ -105,9 +132,11 @@ struct cache *cache_open(const char *log_path, const void *super,
 		err = -EINVAL;	/* not this volume's cache */
 		goto fail;
 	}
-	/* a writer and its views, in whatever processes, fetch into the one file */
-	log_share(&c->log);
+	/* as acquire, except that loading is the catching up */
+	while (flock(c->log.fd, LOCK_EX) && errno == EINTR)
+		;
 	err = log_load(&c->log, chunk_size, nchunks, ALL_EPOCHS);
+	flock(c->log.fd, LOCK_UN);
 fail:
 	free(path);
 	free(mine);
@@ -121,9 +150,17 @@ fail:
 
 void cache_close(struct cache *c)
 {
+	bool held = c && c->log.loaded;
+
 	if (!c)
 		return;
-	log_close(&c->log);
+	/* closing may append a checkpoint; without the file's latest, it must not */
+	if (held && acquire(c))
+		c->log.loaded = false;
+	log_close(&c->log);	/* and with the file goes its lock */
+	if (held)
+		pthread_mutex_unlock(&c->file_lock);
+	pthread_mutex_destroy(&c->file_lock);
 	xa_destroy(&c->fetching);
 	if (c->base)
 		c->ops->close(c->base);
@@ -135,6 +172,17 @@ void cache_close(struct cache *c)
 uint64_t cache_fetched(const struct cache *c)	{ return c->log.mapped; }
 int cache_err(const struct cache *c)		{ return c->err; }
 
+/* Put a fetched chunk in the cache file, unless another open of it has by now. */
+static int store(struct cache *c, uint64_t chunk, const uint8_t *data)
+{
+	int ret = acquire(c);
+
+	if (!ret && !xa_load(&c->log.map, chunk))
+		ret = log_append(&c->log, chunk, data);
+	release(c);
+	return ret;
+}
+
 /*
  * Bring @chunk of the base into the cache and copy @len bytes of it, from
  * @within, into @buf. Only one thread fetches a given chunk: it enters the
@@ -142,8 +190,8 @@ int cache_err(const struct cache *c)		{ return c->err; }
  * find the chunk in the log (and read it) or not (and fetch).
  *
  * Another process may have fetched the chunk since this one last looked at
- * the log, so it looks again before going to the base. Two processes that
- * miss at the same moment both fetch; the log keeps the first to arrive.
+ * the file, so it looks again before going to the base. Two processes that
+ * miss at the same moment both fetch; the file keeps the first to arrive.
  */
 static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 		 uint32_t within, uint32_t len)
@@ -164,9 +212,10 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	if (ret)
 		return ret;
 
-	ret = log_refresh(&c->log);
+	ret = acquire(c);
 	if (!ret)
 		e = xa_load(&c->log.map, chunk);
+	release(c);
 	if (ret || e)
 		;			/* failed, or someone else fetched it meanwhile */
 	else if (!c->base)
@@ -176,7 +225,7 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	else
 		ret = c->ops->read(c->base, chunk * c->chunk_size, tmp, c->chunk_size);
 	if (!ret && tmp)
-		ret = log_append(&c->log, chunk, tmp);
+		ret = store(c, chunk, tmp);
 	if (!ret && tmp)
 		memcpy(buf, tmp + within, len);
 	free(tmp);

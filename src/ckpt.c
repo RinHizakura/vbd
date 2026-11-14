@@ -68,7 +68,7 @@ static int put_part(struct log *l, struct ckpt_hdr *h, uint64_t *ent)
 
 /*
  * Append the map of @l to its own file; with @snap, as a snapshot, which
- * also steps the epoch. The caller holds the log (log.c), which keeps the
+ * also steps the epoch. The caller holds l->append_lock, which keeps the
  * map still, the parts together and the step tied to them.
  */
 static int ckpt_write(struct log *l, bool snap)

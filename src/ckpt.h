@@ -4,9 +4,8 @@
  * that a load can take the map from there and replay only what follows.
  * The log stays one file, and append stays the only way it is written.
  *
- * This is the inside of the log: only log.c calls it, and it holds the log
- * still around ckpt_save and ckpt_snapshot: no append by another thread,
- * nor, for a shared log, by another process.
+ * This is the inside of the log: only log.c calls it, with l->append_lock
+ * held around ckpt_save and ckpt_snapshot.
  */
 #ifndef VBD_CKPT_H
 #define VBD_CKPT_H
