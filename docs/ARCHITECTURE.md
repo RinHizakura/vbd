@@ -208,7 +208,9 @@ describes records a power cut can still take, and only when 64 MiB of
 records have piled up behind the last one (about a tenth of a second of
 replay, see below) and at least four times as many records as that
 one took: the log never shrinks, so checkpoints must stay a small part of
-it. The cache has no checkpoint yet.
+it. The base cache is never synced, since it can be refetched, so it
+writes its checkpoints at close only: after a crash the next open replays
+the cache from its last one.
 
 Replay reads and checksums every byte of every record, so its cost goes by
 bytes, not records. Measured on the development machine, opening a log

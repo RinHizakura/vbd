@@ -2,12 +2,14 @@
 /* The record log: open, replay, append, read. Format and rules in log.h. */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "ckpt.h"
 #include "crc32c.h"
 #include "log.h"
 
@@ -64,8 +66,16 @@ void log_init(struct log *l)
 	pthread_mutex_init(&l->append_lock, NULL);
 }
 
+/* A view's map is not the whole log's, and a log that failed to load has none. */
+static bool takes_checkpoints(const struct log *l)
+{
+	return l->loaded && l->upto == ALL_EPOCHS;
+}
+
 void log_close(struct log *l)
 {
+	if (takes_checkpoints(l))
+		ckpt_save(l);
 	xa_destroy(&l->map);
 	if (l->fd >= 0)
 		close(l->fd);
@@ -80,7 +90,11 @@ int log_open(struct log *l, const char *path, void *super)
 	return full_pread(l->fd, super, SUPER_SIZE, 0);
 }
 
-int log_replay(struct log *l, uint64_t upto)
+/*
+ * Bring the map up to date with the file, from record l->nrec on: 0, or
+ * just past the checkpoint the map was taken from.
+ */
+static int log_replay(struct log *l)
 {
 	struct stat st;
 	uint8_t *data = malloc(l->chunk_size);
@@ -113,7 +127,7 @@ int log_replay(struct log *l, uint64_t upto)
 			break;		/* torn tail */
 		if (h.epoch > l->epoch)
 			l->epoch = h.epoch;
-		if (h.chunk == SNAP_MARK || h.epoch > upto)
+		if (h.chunk == SNAP_MARK || h.epoch > l->upto)
 			continue;	/* marker, or written after the snapshot shown */
 		if ((ret = log_map(l, h.chunk, l->nrec)))
 			goto out;
@@ -124,6 +138,28 @@ int log_replay(struct log *l, uint64_t upto)
 out:
 	free(data);
 	return ret;
+}
+
+int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto)
+{
+	int ret;
+
+	l->chunk_size = chunk_size;
+	l->nchunks = nchunks;
+	l->upto = upto;
+	/* a checkpoint is the newest map; a view filters, so it replays it all */
+	if (upto == ALL_EPOCHS)
+		ckpt_load(l);
+	ret = log_replay(l);
+	l->loaded = !ret;
+	return ret;
+}
+
+int log_sync(struct log *l)
+{
+	if (takes_checkpoints(l))
+		ckpt_save(l);
+	return fdatasync(l->fd) ? -errno : 0;
 }
 
 int rec_write(struct log *l, const void *hdr, const void *data)

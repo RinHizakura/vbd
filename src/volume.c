@@ -24,7 +24,6 @@
 #include "common.h"
 #include "vbd.h"
 #include "crc32c.h"
-#include "ckpt.h"
 #include "log.h"
 #include "base/base.h"
 
@@ -44,12 +43,11 @@ struct super {
 _Static_assert(sizeof(struct super) == SUPER_SIZE, "super block");
 
 /* vbd.at value for a normal, writable open */
-#define LIVE		UINT64_MAX
+#define LIVE		ALL_EPOCHS
 
 struct vbd {
 	uint64_t size;
 	uint32_t chunk_size;
-	bool ready;		/* open finished; the maps describe the files */
 	const struct base_ops *base_ops;	/* NULL: all-zero base */
 	void *base;		/* NULL while base_ops is set: base unreachable, offline */
 	int base_err;		/* why the base is unreachable, 0 when it is open */
@@ -197,14 +195,9 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 	}
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
-	v->data.chunk_size = v->cache.chunk_size = sb.chunk_size;
-	v->data.nchunks = v->cache.nchunks = sb.size / sb.chunk_size;
 	if ((err = open_base(v, &sb)))
 		goto fail;
-	/* a checkpoint is the newest map; a snapshot view filters, so it replays it all */
-	if (writable(v))
-		ckpt_load(&v->data);
-	if ((err = log_replay(&v->data, v->at)))
+	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, v->at)))
 		goto fail;
 	if (!writable(v) && v->at >= v->data.epoch) {
 		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
@@ -227,10 +220,11 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 			err = -EINVAL;
 			goto fail;
 		}
-		if ((err = log_replay(&v->cache, ALL_EPOCHS)))
+		/* the base has no history: whatever snapshot is shown, all of the cache counts */
+		if ((err = log_load(&v->cache, sb.chunk_size, sb.size / sb.chunk_size,
+				    ALL_EPOCHS)))
 			goto fail;
 	}
-	v->ready = true;
 	return v;
 fail:
 	vbd_close(v);
@@ -247,8 +241,6 @@ void vbd_close(struct vbd *v)
 {
 	if (!v)
 		return;
-	if (v->ready && writable(v))
-		ckpt_save(&v->data);
 	log_close(&v->data);
 	log_close(&v->cache);
 	xa_destroy(&v->fetching);
@@ -404,10 +396,8 @@ ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off)
 
 int vbd_flush(struct vbd *v)
 {
-	if (writable(v))
-		ckpt_save(&v->data);
 	/* the cache can always be refetched; only the data log needs to last */
-	return fdatasync(v->data.fd) ? -errno : 0;
+	return log_sync(&v->data);
 }
 
 uint64_t vbd_epoch(const struct vbd *v)		{ return v->data.epoch; }

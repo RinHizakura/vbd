@@ -43,8 +43,8 @@ Done:
   at `flush` and at close, once 64 MiB of records have piled up and at least
   four times what the previous checkpoint took, because a checkpoint stays
   in the log for good. Covered records are not checksummed again on open:
-  that is the time it saves. Not yet: the cache has none, and a snapshot
-  view still replays the whole log (P3).
+  that is the time it saves. The base cache checkpoints the same way, at
+  close only. Not yet: a snapshot view still replays the whole log (P3).
 
 ## P2: lazy fetch
 
@@ -130,3 +130,7 @@ Remaining:
   checkpoint periodically or add shrinking
 - whether the mapping layer should move to a Rust XArray once one lands in
   the kernel
+- a snapshot view truncates a torn tail when it opens, like a writable
+  open does. With another process writing the same log at that moment, the
+  view can cut off a record that is only half written yet; and nothing
+  stops two processes from opening one volume for writing

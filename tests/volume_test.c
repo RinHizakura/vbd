@@ -77,17 +77,22 @@ static struct vbd *reopen(struct vbd *v)
 	return v;
 }
 
-/* Flip one bit at @off in the log. */
-static void flip_log_bit(uint64_t off)
+/* Flip one bit at @off in the file at @path. */
+static void flip_bit(const char *path, uint64_t off)
 {
 	uint8_t byte;
-	int fd = open(log_path, O_RDWR);
+	int fd = open(path, O_RDWR);
 
 	assert(fd >= 0);
 	assert(pread(fd, &byte, 1, off) == 1);
 	byte ^= 1;
 	assert(pwrite(fd, &byte, 1, off) == 1);
 	close(fd);
+}
+
+static void flip_log_bit(uint64_t off)
+{
+	flip_bit(log_path, off);
 }
 
 static void test_create_errors(void)
@@ -467,6 +472,68 @@ static void test_checkpoint(void)
 	unlink(log_path);
 }
 
+/*
+ * The base cache is a log like the data log, so it checkpoints the same
+ * way, when the volume is closed. A base big enough to be due for one is
+ * read through; after a reopen the cache is known from the checkpoint, not
+ * from its records: damage to the first of them would otherwise empty it.
+ */
+#define BIG_CHUNKS	17000u		/* 66 MiB: past CKPT_BYTES of cache records */
+#define BIG_PARTS	((BIG_CHUNKS + CHUNK / 16 - 1) / (CHUNK / 16))
+
+/* Chunk @i of the big base: its own number, over and over. */
+static void big_chunk(uint8_t *p, uint32_t i)
+{
+	for (size_t k = 0; k < CHUNK; k += sizeof(i))
+		memcpy(p + k, &i, sizeof(i));
+}
+
+static void test_cache_checkpoint(void)
+{
+	char big_base[] = "/tmp/vbd-base-cache.img", cache_path[sizeof(log_path) + 8];
+	uint8_t want[CHUNK];
+	struct stat st;
+	struct vbd *v;
+	FILE *f = fopen(big_base, "w");
+
+	assert(f);
+	for (uint32_t i = 0; i < BIG_CHUNKS; i++) {
+		big_chunk(want, i);
+		assert(fwrite(want, CHUNK, 1, f) == 1);
+	}
+	assert(fclose(f) == 0);
+	snprintf(log_path, sizeof(log_path), "%s.log", big_base);
+	snprintf(cache_path, sizeof(cache_path), "%s.cache", log_path);
+	assert(vbd_create(log_path, (uint64_t)BIG_CHUNKS * CHUNK, CHUNK, big_base) == 0);
+
+	v = vbd_open(log_path);
+	assert(v);
+	for (uint32_t i = 0; i < BIG_CHUNKS; i++) {
+		big_chunk(want, i);
+		assert(vbd_read(v, buf, CHUNK, (uint64_t)i * CHUNK) == CHUNK);
+		assert(memcmp(buf, want, CHUNK) == 0);
+	}
+	assert(vbd_fetched(v) == BIG_CHUNKS);
+	vbd_close(v);				/* appends the checkpoint */
+	assert(stat(cache_path, &st) == 0);
+	assert(st.st_size == SUPER_SIZE + (uint64_t)(BIG_CHUNKS + BIG_PARTS) * REC);
+
+	flip_bit(cache_path, SUPER_SIZE + 64 + 1);	/* cache record 0: chunk 0 */
+	v = vbd_open(log_path);
+	assert(v && vbd_fetched(v) == BIG_CHUNKS);	/* checkpoint records are not chunks */
+	big_chunk(want, BIG_CHUNKS - 1);
+	assert(vbd_read(v, buf, CHUNK, (uint64_t)(BIG_CHUNKS - 1) * CHUNK) == CHUNK);
+	assert(memcmp(buf, want, CHUNK) == 0);
+	assert(vbd_fetched(v) == BIG_CHUNKS);		/* served from the cache */
+	vbd_close(v);
+	assert(stat(cache_path, &st) == 0);		/* nothing new: no second checkpoint */
+	assert(st.st_size == SUPER_SIZE + (uint64_t)(BIG_CHUNKS + BIG_PARTS) * REC);
+
+	unlink(cache_path);
+	unlink(log_path);
+	unlink(big_base);
+}
+
 #define RUN(t)	do { t(); puts("  " #t); } while (0)
 
 int main(void)
@@ -488,6 +555,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_checkpoint);
+	RUN(test_cache_checkpoint);
 
 	rcu_barrier();
 	rcu_unregister_thread();

@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Checkpoints: now and then a log's map is appended to the log itself, so
- * that open can take the map from there and replay only what follows. The
- * log stays one file, and append stays the only way it is written.
+ * that a load can take the map from there and replay only what follows.
+ * The log stays one file, and append stays the only way it is written.
+ *
+ * This is the inside of the log: only log.c calls it.
  */
 #ifndef VBD_CKPT_H
 #define VBD_CKPT_H
@@ -10,8 +12,8 @@
 #include "log.h"
 
 /*
- * Start @l from its last complete checkpoint, if it has one; call before
- * log_replay. The records a checkpoint covers are not read again, so their
+ * Start @l from its last complete checkpoint, if it has one, before the
+ * replay. The records a checkpoint covers are not read again, so their
  * checksums are not re-verified: that is the time it saves.
  */
 void ckpt_load(struct log *l);
