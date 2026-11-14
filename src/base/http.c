@@ -105,6 +105,14 @@ static size_t on_body(char *data, size_t size, size_t n, void *arg)
 	return n;
 }
 
+/* What every request has in common: follow redirects, fail on an HTTP error. */
+static void request(CURL *curl, const char *url)
+{
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+}
+
 /* HEAD: size and validator. No Content-Length means the volume cannot be sized. */
 static int http_head(const char *url, uint64_t *size, char *tag, size_t tag_len)
 {
@@ -119,10 +127,8 @@ static int http_head(const char *url, uint64_t *size, char *tag, size_t tag_len)
 	curl = curl_easy_init();
 	if (!curl)
 		return -ENOMEM;
-	curl_easy_setopt(curl, CURLOPT_URL, url);
+	request(curl, url);
 	curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
 	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, on_header);
 	curl_easy_setopt(curl, CURLOPT_HEADERDATA, &t);
 	rc = curl_easy_perform(curl);
@@ -184,10 +190,8 @@ static int http_read(void *arg, uint64_t off, void *buf, size_t len)
 
 	pthread_mutex_lock(&h->lock);
 	curl_easy_reset(h->curl);
-	curl_easy_setopt(h->curl, CURLOPT_URL, h->url);
+	request(h->curl, h->url);
 	curl_easy_setopt(h->curl, CURLOPT_RANGE, range);
-	curl_easy_setopt(h->curl, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(h->curl, CURLOPT_FAILONERROR, 1L);
 	curl_easy_setopt(h->curl, CURLOPT_WRITEFUNCTION, on_body);
 	curl_easy_setopt(h->curl, CURLOPT_WRITEDATA, &s);
 	rc = curl_easy_perform(h->curl);

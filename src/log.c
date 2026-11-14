@@ -10,6 +10,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "common.h"
 #include "ckpt.h"
 #include "crc32c.h"
 #include "log.h"
@@ -17,28 +18,6 @@
 uint64_t rec_off(const struct log *l, uint64_t rec)
 {
 	return SUPER_SIZE + rec * (HDR_SIZE + (uint64_t)l->chunk_size);
-}
-
-/* pread all of it; past the end of the file reads as zeros. 0 or -errno. */
-static int full_pread(int fd, void *buf, size_t len, uint64_t off)
-{
-	uint8_t *p = buf;
-
-	while (len) {
-		ssize_t n = pread(fd, p, len, off);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -errno;
-		}
-		if (n == 0) {		/* short file: rest reads as zeros */
-			memset(p, 0, len);
-			return 0;
-		}
-		p += n; len -= n; off += n;
-	}
-	return 0;
 }
 
 int log_map(struct log *l, uint64_t chunk, uint64_t rec)
