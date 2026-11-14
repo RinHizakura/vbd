@@ -169,80 +169,78 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 	return cache_read(v->cache, chunk, buf, within, len);
 }
 
-/* Cut @len at the end of the volume. */
-static size_t clamp_len(const struct vbd *v, size_t len, uint64_t off)
+/*
+ * Replace @len bytes at @within of @chunk. A whole chunk is appended as it
+ * is; a part of one is read-modify-write, since a record holds a whole
+ * chunk.
+ */
+static int write_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
+		       uint32_t within, uint32_t len)
 {
-	if (off >= v->size)
-		return 0;
-	return len > v->size - off ? v->size - off : len;
+	uint8_t *tmp;
+	int ret;
+
+	if (len == v->chunk_size)
+		return log_append(&v->data, chunk, buf);
+	tmp = malloc(v->chunk_size);
+	if (!tmp)
+		return -ENOMEM;
+	ret = read_chunk(v, chunk, tmp, 0, v->chunk_size);
+	if (!ret) {
+		memcpy(tmp + within, buf, len);
+		ret = log_append(&v->data, chunk, tmp);
+	}
+	free(tmp);
+	return ret;
 }
 
-/* Syscall convention: bytes done if any, else the error. */
-static ssize_t done_or_err(size_t done, int err)
+/* What to do with the part of a byte range that lies in one chunk. */
+typedef int span_fn(struct vbd *v, uint64_t chunk, uint8_t *buf,
+		    uint32_t within, uint32_t len);
+
+/*
+ * Walk the byte range [@off, @off + @len), cut short at the end of the
+ * volume, one chunk at a time, handing each piece and its place in @buf to
+ * @fn. Stops at the first error. Syscall convention: the bytes done if
+ * any, else the error; 0 for a range that starts at or past the end.
+ */
+static ssize_t each_span(struct vbd *v, uint8_t *buf, size_t len, uint64_t off,
+			 span_fn *fn)
 {
-	return done ? (ssize_t)done : err;
+	size_t done = 0;
+	int ret = 0;
+
+	if (off >= v->size)
+		return 0;
+	if (len > v->size - off)
+		len = v->size - off;
+	while (!ret && len) {
+		uint32_t within = off % v->chunk_size;
+		uint32_t n = v->chunk_size - within;
+
+		if (n > len)
+			n = len;
+		ret = fn(v, off / v->chunk_size, buf, within, n);
+		if (!ret) {
+			buf += n; off += n; len -= n; done += n;
+		}
+	}
+	return done ? (ssize_t)done : ret;
 }
 
 ssize_t vbd_read(struct vbd *v, void *buf, size_t len, uint64_t off)
 {
-	uint8_t *p = buf;
-	size_t done = 0;
-	int ret = 0;
-
-	len = clamp_len(v, len, off);
-	while (!ret && len) {
-		uint32_t within = off % v->chunk_size;
-		uint32_t n = v->chunk_size - within;
-
-		if (n > len)
-			n = len;
-		ret = read_chunk(v, off / v->chunk_size, p, within, n);
-		if (!ret) {
-			p += n; off += n; len -= n; done += n;
-		}
-	}
-	return done_or_err(done, ret);
+	return each_span(v, buf, len, off, read_chunk);
 }
 
 ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off)
 {
-	const uint8_t *p = buf;
-	uint8_t *tmp = NULL;
-	size_t done = 0;
-	int ret = 0;
-
 	if (!writable(v))
 		return -EROFS;
 	if (off >= v->size)
 		return -ENOSPC;
-	len = clamp_len(v, len, off);
-	while (!ret && len) {
-		uint64_t chunk = off / v->chunk_size;
-		uint32_t within = off % v->chunk_size;
-		uint32_t n = v->chunk_size - within;
-
-		if (n > len)
-			n = len;
-		if (n == v->chunk_size) {
-			ret = log_append(&v->data, chunk, p);
-		} else {
-			/* partial chunk: read-modify-write */
-			if (!tmp && !(tmp = malloc(v->chunk_size))) {
-				ret = -ENOMEM;
-				break;
-			}
-			ret = read_chunk(v, chunk, tmp, 0, v->chunk_size);
-			if (!ret) {
-				memcpy(tmp + within, p, n);
-				ret = log_append(&v->data, chunk, tmp);
-			}
-		}
-		if (!ret) {
-			p += n; off += n; len -= n; done += n;
-		}
-	}
-	free(tmp);
-	return done_or_err(done, ret);
+	/* write_chunk only reads from the buffer */
+	return each_span(v, (uint8_t *)buf, len, off, write_chunk);
 }
 
 int vbd_flush(struct vbd *v)
