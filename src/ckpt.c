@@ -18,31 +18,6 @@
 
 #include "ckpt.h"
 
-/*
- * Checkpoint once this many bytes of log would have to be replayed. Replay
- * reads and checksums every byte: about 540 MiB/s from the page cache on
- * the machine this was measured on, whatever the chunk size, so this bounds
- * an open after a crash to roughly a tenth of a second there.
- */
-#define CKPT_BYTES	(64u << 20)
-
-struct ckpt_hdr {
-	uint32_t magic;		/* CKPT_MAGIC */
-	uint32_t crc;		/* crc32c of the data that follows */
-	uint64_t epoch;		/* no record it covers has a larger one */
-	uint32_t part;		/* this record is part @part ... */
-	uint32_t parts;		/* ... of @parts */
-	uint64_t count;		/* map entries in the data: (chunk, record) as two uint64_t */
-	/*
-	 * What records after it are stamped with: @epoch, or @epoch + 1 when
-	 * the checkpoint is a snapshot, the one numbered @epoch.
-	 */
-	uint64_t next_epoch;
-	uint8_t  pad[HDR_SIZE - 40];
-};
-_Static_assert(sizeof(struct rec_hdr) == HDR_SIZE && sizeof(struct ckpt_hdr) == HDR_SIZE,
-	       "record headers");
-
 /* Map entries that fit in the data of one record. */
 static uint64_t per_record(const struct log *l)
 {

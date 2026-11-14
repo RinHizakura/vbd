@@ -39,7 +39,7 @@ build/%.o: src/%.c include/*.h src/*.h src/base/*.h | build
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-build/volume_test: tests/volume_test.c $(LIB) $(XARRAY_LIB) | build
+build/volume_test: tests/volume_test.c src/*.h $(LIB) $(XARRAY_LIB) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
 test: build/volume_test $(BIN)

@@ -15,10 +15,13 @@
 #include <urcu.h>
 
 #include "vbd.h"
+/* the on-disk format, for the tests that look at or damage the files */
+#include "../src/ckpt.h"
+#include "../src/log.h"
 
 #define SIZE		(1u << 20)	/* 1 MiB volume */
 #define CHUNK		4096u
-#define SUPER_SIZE	4096		/* must match volume.c */
+#define REC		(HDR_SIZE + CHUNK)	/* one record of the test volumes */
 
 static uint8_t ref[SIZE], buf[SIZE];
 static char base_path[] = "/tmp/vbd-base-XXXXXX";
@@ -215,7 +218,7 @@ static void test_bad_record(void)
 	assert(vbd_write(v, buf, CHUNK, CHUNK) == CHUNK);	/* record 1 */
 	vbd_close(v);
 
-	flip_log_bit(SUPER_SIZE + 64 + 1);	/* record 0 data: crc mismatch */
+	flip_log_bit(SUPER_SIZE + HDR_SIZE + 1);	/* record 0 data: crc mismatch */
 	v = vbd_open(log_path);
 	assert(v);
 	/* both records are gone, so both chunks read the base again */
@@ -325,44 +328,31 @@ static void test_concurrent_fetch(void)
 	teardown(v);
 }
 
-/* What record @n of the log is, read straight from the file. */
-struct rec_info {
-	uint32_t magic;
-	uint64_t chunk, epoch;		/* data record */
-	uint64_t ckpt_epoch, next_epoch;	/* checkpoint record */
-};
-#define REC_MAGIC	0x31646276u	/* "vbd1", as in log.h */
-#define CKPT_MAGIC	0x6b636276u	/* "vbck" */
-
-static struct rec_info rec_info(uint64_t n)
+/* The header of record @n, read straight from the file. */
+static void read_hdr(uint64_t n, void *hdr)
 {
-	struct rec_info r;
 	int fd = open(log_path, O_RDONLY);
-	off_t off = SUPER_SIZE + n * (64 + CHUNK);
 
 	assert(fd >= 0);
-	assert(pread(fd, &r.magic, 4, off) == 4);
-	assert(pread(fd, &r.chunk, 8, off + 8) == 8);		/* after magic, crc */
-	assert(pread(fd, &r.epoch, 8, off + 16) == 8);
-	assert(pread(fd, &r.ckpt_epoch, 8, off + 8) == 8);
-	assert(pread(fd, &r.next_epoch, 8, off + 32) == 8);	/* after part, parts, count */
+	assert(pread(fd, hdr, HDR_SIZE, SUPER_SIZE + n * REC) == HDR_SIZE);
 	close(fd);
-	return r;
 }
 
 static void expect_data(uint64_t n, uint64_t chunk, uint64_t epoch)
 {
-	struct rec_info r = rec_info(n);
+	struct rec_hdr h;
 
-	assert(r.magic == REC_MAGIC && r.chunk == chunk && r.epoch == epoch);
+	read_hdr(n, &h);
+	assert(h.magic == VBD_MAGIC && h.chunk == chunk && h.epoch == epoch);
 }
 
 /* Record @n is the checkpoint of snapshot @snap: it steps the epoch past it. */
 static void expect_snapshot(uint64_t n, uint64_t snap)
 {
-	struct rec_info r = rec_info(n);
+	struct ckpt_hdr h;
 
-	assert(r.magic == CKPT_MAGIC && r.ckpt_epoch == snap && r.next_epoch == snap + 1);
+	read_hdr(n, &h);
+	assert(h.magic == CKPT_MAGIC && h.epoch == snap && h.next_epoch == snap + 1);
 }
 
 static void test_snapshot(void)
@@ -404,7 +394,7 @@ static void test_snapshot_checkpoint(void)
 	struct stat st;
 
 	assert(vbd_snapshot(v) == 0);			/* rec 0: snapshot 0, of nothing */
-	assert(stat(log_path, &st) == 0 && st.st_size == SUPER_SIZE + 64 + CHUNK);
+	assert(stat(log_path, &st) == 0 && st.st_size == SUPER_SIZE + REC);
 	fill_random(a, CHUNK); fill_random(b, CHUNK); fill_random(c, CHUNK);
 	assert(vbd_write(v, a, CHUNK, 0) == CHUNK);		/* rec 1 */
 	assert(vbd_write(v, b, CHUNK, CHUNK) == CHUNK);		/* rec 2 */
@@ -414,7 +404,7 @@ static void test_snapshot_checkpoint(void)
 	expect_snapshot(0, 0);
 	expect_snapshot(3, 1);
 
-	flip_log_bit(SUPER_SIZE + 2 * (64 + CHUNK) - 1);	/* rec 1, chunk 0 as of snapshot 1 */
+	flip_log_bit(SUPER_SIZE + 2 * REC - 1);	/* rec 1, chunk 0 as of snapshot 1 */
 	v = vbd_open_at(log_path, 1);
 	assert(v && vbd_epoch(v) == 2);
 	assert(vbd_read(v, buf, CHUNK, CHUNK) == CHUNK && memcmp(buf, b, CHUNK) == 0);
@@ -518,13 +508,13 @@ static void test_shared_cache(void)
 	assert(memcmp(buf, ref + 5 * CHUNK, 10 * CHUNK) == 0);
 	assert(vbd_fetched(view) == 15);	/* found 0..9 there, added 10..14 */
 	assert(stat(cache_path, &st) == 0);
-	assert(st.st_size == SUPER_SIZE + 15 * (64 + CHUNK));
+	assert(st.st_size == SUPER_SIZE + 15 * REC);
 
 	check_all(v);				/* its own, the view's, and the rest */
 	check_all(view);
 	assert(vbd_fetched(v) == nbase && vbd_fetched(view) == nbase);
 	assert(stat(cache_path, &st) == 0);
-	assert(st.st_size == SUPER_SIZE + nbase * (64 + CHUNK));
+	assert(st.st_size == SUPER_SIZE + nbase * REC);
 
 	vbd_close(view);
 	v = reopen(v);
@@ -559,7 +549,7 @@ static void test_view_keeps_tail(void)
 	assert(v && vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, a, CHUNK) == 0);
 	vbd_close(v);
 	assert(vbd_open_at(log_path, 7) == NULL && errno == ENOENT);	/* replays to the end */
-	flip_log_bit(SUPER_SIZE + (64 + CHUNK) + 64 + 1);	/* snapshot 0's checkpoint */
+	flip_log_bit(SUPER_SIZE + REC + HDR_SIZE + 1);	/* snapshot 0's checkpoint */
 	v = vbd_open_at(log_path, 0);				/* by replay */
 	assert(v && vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, a, CHUNK) == 0);
 	vbd_close(v);
@@ -571,8 +561,6 @@ static void test_view_keeps_tail(void)
 	teardown(v);
 }
 
-#define CKPT_BYTES	(64u << 20)	/* must match volume.c */
-#define REC		(64 + CHUNK)
 #define CKPT_NREC	((CKPT_BYTES + REC - 1) / REC)	/* records until one is due */
 #define BIG		(3u << 20)	/* 768 chunks: a map of three records */
 
@@ -600,14 +588,14 @@ static void test_checkpoint(void)
 	assert(stat(log_path, &st) == 0);
 	assert(st.st_size == SUPER_SIZE + (CKPT_NREC + 2) * REC);
 
-	flip_log_bit(SUPER_SIZE + 64 + 1);	/* record 0: covered, long superseded */
+	flip_log_bit(SUPER_SIZE + HDR_SIZE + 1);	/* record 0: covered, long superseded */
 	v = vbd_open(log_path);
 	assert(v);
 	check_all(v);				/* the map from the checkpoint, the last record by replay */
 	vbd_close(v);
 
-	flip_log_bit(SUPER_SIZE + 64 + 1);	/* heal record 0, break the checkpoint */
-	flip_log_bit(SUPER_SIZE + CKPT_NREC * REC + 64 + 1);
+	flip_log_bit(SUPER_SIZE + HDR_SIZE + 1);	/* heal record 0, break the checkpoint */
+	flip_log_bit(SUPER_SIZE + CKPT_NREC * REC + HDR_SIZE + 1);
 	v = vbd_open(log_path);
 	assert(v);
 	check_all(v);				/* by replay from record 0 */
@@ -629,7 +617,7 @@ static void test_checkpoint(void)
 	vbd_close(v);
 	assert(stat(log_path, &st) == 0);
 	assert(st.st_size == SUPER_SIZE + (CKPT_NREC + 3) * REC);
-	flip_log_bit(SUPER_SIZE + 64 + 1);	/* record 0 again */
+	flip_log_bit(SUPER_SIZE + HDR_SIZE + 1);	/* record 0 again */
 	v = vbd_open(log_path);
 	assert(v && vbd_read(v, big_buf, BIG, 0) == BIG && memcmp(big_buf, big_ref, BIG) == 0);
 	vbd_close(v);
@@ -682,7 +670,7 @@ static void test_cache_checkpoint(void)
 	assert(stat(cache_path, &st) == 0);
 	assert(st.st_size == SUPER_SIZE + (uint64_t)(BIG_CHUNKS + BIG_PARTS) * REC);
 
-	flip_bit(cache_path, SUPER_SIZE + 64 + 1);	/* cache record 0: chunk 0 */
+	flip_bit(cache_path, SUPER_SIZE + HDR_SIZE + 1);	/* cache record 0: chunk 0 */
 	v = vbd_open(log_path);
 	assert(v && vbd_fetched(v) == BIG_CHUNKS);	/* checkpoint records are not chunks */
 	big_chunk(want, BIG_CHUNKS - 1);
