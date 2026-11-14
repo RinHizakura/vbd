@@ -49,6 +49,7 @@ struct rec_hdr {
 /* log_load's @upto for the whole log, as it is now */
 #define ALL_EPOCHS	UINT64_MAX
 
+/* What is in here is for log.c and ckpt.c; everyone else uses the functions. */
 struct log {
 	int fd;
 	uint32_t chunk_size;	/* bytes of data in a record */
@@ -99,7 +100,8 @@ int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto
  * Read in the records that another open of the same file appended since
  * this one loaded or last caught up. The caller keeps every other open from
  * appending meanwhile, here and for as long as it goes on to append itself:
- * a log does not look at the file again on its own. 0 or -errno.
+ * a log does not look at the file again on its own. 0 or -errno; after an
+ * error, or before the log was loaded, the log takes no checkpoints.
  */
 int log_catch_up(struct log *l);
 
@@ -116,8 +118,21 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data);
  */
 int log_snapshot(struct log *l);
 
-/* Read @len bytes of record @rec starting @within bytes into its data. */
-int log_read(struct log *l, uint64_t rec, uint8_t *buf, uint32_t within, uint32_t len);
+/* Does the log hold @chunk? Once it does, it always will. */
+bool log_has(const struct log *l, uint64_t chunk);
+
+/*
+ * Read @len bytes of @chunk, as it was last appended, starting @within
+ * bytes into it. -ENOENT if the log does not hold the chunk.
+ */
+int log_read(struct log *l, uint64_t chunk, uint8_t *buf, uint32_t within, uint32_t len);
+
+/* How many different chunks the log holds. */
+uint64_t log_chunks(const struct log *l);
+/* The epoch new records are stamped with: the number of snapshots taken. */
+uint64_t log_epoch(const struct log *l);
+/* The open file, for a caller that locks it (see log_catch_up). */
+int log_fd(const struct log *l);
 
 /* For code that writes records of its own kind (ckpt.c). */
 /* Point @chunk at record @rec in the map. 0 or -errno. */

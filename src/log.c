@@ -185,8 +185,12 @@ int log_catch_up(struct log *l)
 {
 	int ret;
 
+	if (!l->loaded)
+		return -EINVAL;
 	pthread_mutex_lock(&l->append_lock);
 	ret = log_replay(l);
+	if (ret)
+		l->loaded = false;	/* the map is no longer the file */
 	pthread_mutex_unlock(&l->append_lock);
 	return ret;
 }
@@ -238,7 +242,20 @@ int log_snapshot(struct log *l)
 	return ret;
 }
 
-int log_read(struct log *l, uint64_t rec, uint8_t *buf, uint32_t within, uint32_t len)
+bool log_has(const struct log *l, uint64_t chunk)
 {
-	return full_pread(l->fd, buf, len, rec_off(l, rec) + HDR_SIZE + within);
+	return xa_load((struct xarray *)&l->map, chunk) != NULL;
 }
+
+int log_read(struct log *l, uint64_t chunk, uint8_t *buf, uint32_t within, uint32_t len)
+{
+	void *e = xa_load(&l->map, chunk);
+
+	if (!e)
+		return -ENOENT;
+	return full_pread(l->fd, buf, len, rec_off(l, xa_to_value(e)) + HDR_SIZE + within);
+}
+
+uint64_t log_chunks(const struct log *l)	{ return l->mapped; }
+uint64_t log_epoch(const struct log *l)		{ return l->epoch; }
+int log_fd(const struct log *l)			{ return l->fd; }

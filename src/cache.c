@@ -7,6 +7,8 @@
 #include <string.h>
 #include <sys/file.h>
 
+#include <xarray.h>
+
 #include "cache.h"
 #include "log.h"
 #include "base/base.h"
@@ -20,6 +22,7 @@ struct cache {
 	int err;		/* why the base is unreachable, 0 when it is open */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	struct log log;		/* base chunks fetched so far */
+	bool has_file;		/* log is open on the cache file */
 	pthread_mutex_t file_lock;	/* one thread of ours at the cache file at a time */
 	struct xarray fetching;	/* chunks being fetched from the base right now */
 	pthread_mutex_t fetch_lock;	/* guards fetching */
@@ -49,7 +52,7 @@ static char *cache_path(const char *log_path)
 static int acquire(struct cache *c)
 {
 	pthread_mutex_lock(&c->file_lock);
-	while (flock(c->log.fd, LOCK_EX))
+	while (flock(log_fd(&c->log), LOCK_EX))
 		if (errno != EINTR)
 			return -errno;
 	return log_catch_up(&c->log);
@@ -57,7 +60,7 @@ static int acquire(struct cache *c)
 
 static void release(struct cache *c)
 {
-	flock(c->log.fd, LOCK_UN);
+	flock(log_fd(&c->log), LOCK_UN);
 	pthread_mutex_unlock(&c->file_lock);
 }
 
@@ -128,15 +131,16 @@ struct cache *cache_open(const char *log_path, const void *super,
 	}
 	if ((err = log_open(&c->log, path, mine)))
 		goto fail;
+	c->has_file = true;
 	if (memcmp(mine, super, SUPER_SIZE)) {
 		err = -EINVAL;	/* not this volume's cache */
 		goto fail;
 	}
 	/* as acquire, except that loading is the catching up */
-	while (flock(c->log.fd, LOCK_EX) && errno == EINTR)
+	while (flock(log_fd(&c->log), LOCK_EX) && errno == EINTR)
 		;
 	err = log_load(&c->log, chunk_size, nchunks, ALL_EPOCHS);
-	flock(c->log.fd, LOCK_UN);
+	flock(log_fd(&c->log), LOCK_UN);
 fail:
 	free(path);
 	free(mine);
@@ -150,15 +154,16 @@ fail:
 
 void cache_close(struct cache *c)
 {
-	bool held = c && c->log.loaded;
-
 	if (!c)
 		return;
-	/* closing may append a checkpoint; without the file's latest, it must not */
-	if (held && acquire(c))
-		c->log.loaded = false;
+	/*
+	 * Closing may append a checkpoint, so the file has to be ours and the
+	 * log up to date with it. If it cannot catch up it will not checkpoint.
+	 */
+	if (c->has_file)
+		acquire(c);
 	log_close(&c->log);	/* and with the file goes its lock */
-	if (held)
+	if (c->has_file)
 		pthread_mutex_unlock(&c->file_lock);
 	pthread_mutex_destroy(&c->file_lock);
 	xa_destroy(&c->fetching);
@@ -169,7 +174,7 @@ void cache_close(struct cache *c)
 	free(c);
 }
 
-uint64_t cache_fetched(const struct cache *c)	{ return c->log.mapped; }
+uint64_t cache_fetched(const struct cache *c)	{ return log_chunks(&c->log); }
 int cache_err(const struct cache *c)		{ return c->err; }
 
 /* Put a fetched chunk in the cache file, unless another open of it has by now. */
@@ -177,7 +182,7 @@ static int store(struct cache *c, uint64_t chunk, const uint8_t *data)
 {
 	int ret = acquire(c);
 
-	if (!ret && !xa_load(&c->log.map, chunk))
+	if (!ret && !log_has(&c->log, chunk))
 		ret = log_append(&c->log, chunk, data);
 	release(c);
 	return ret;
@@ -197,26 +202,26 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 		 uint32_t within, uint32_t len)
 {
 	uint8_t *tmp = NULL;
-	void *e;
+	bool have;
 	int ret = 0;
 
 	pthread_mutex_lock(&c->fetch_lock);
 	while (xa_load(&c->fetching, chunk))
 		pthread_cond_wait(&c->fetch_done, &c->fetch_lock);
-	e = xa_load(&c->log.map, chunk);
-	if (!e)
+	have = log_has(&c->log, chunk);
+	if (!have)
 		ret = xa_err(xa_store(&c->fetching, chunk, FETCHING, GFP_KERNEL));
 	pthread_mutex_unlock(&c->fetch_lock);
-	if (e)
-		return log_read(&c->log, xa_to_value(e), buf, within, len);
+	if (have)
+		return log_read(&c->log, chunk, buf, within, len);
 	if (ret)
 		return ret;
 
 	ret = acquire(c);
 	if (!ret)
-		e = xa_load(&c->log.map, chunk);
+		have = log_has(&c->log, chunk);
 	release(c);
-	if (ret || e)
+	if (ret || have)
 		;			/* failed, or someone else fetched it meanwhile */
 	else if (!c->base)
 		ret = c->err;		/* offline: nothing to fetch from */
@@ -234,22 +239,19 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	xa_erase(&c->fetching, chunk);	/* in the log now, or the next reader tries */
 	pthread_cond_broadcast(&c->fetch_done);
 	pthread_mutex_unlock(&c->fetch_lock);
-	if (!ret && e)
-		ret = log_read(&c->log, xa_to_value(e), buf, within, len);
+	if (!ret && have)
+		ret = log_read(&c->log, chunk, buf, within, len);
 	return ret;
 }
 
 int cache_read(struct cache *c, uint64_t chunk, uint8_t *buf,
 	       uint32_t within, uint32_t len)
 {
-	void *e;
-
 	if (!c->ops || chunk * c->chunk_size >= c->base_size) {
 		memset(buf, 0, len);	/* no base, or past its end: nothing to fetch */
 		return 0;
 	}
-	e = xa_load(&c->log.map, chunk);
-	if (e)
-		return log_read(&c->log, xa_to_value(e), buf, within, len);
+	if (log_has(&c->log, chunk))
+		return log_read(&c->log, chunk, buf, within, len);
 	return fetch(c, chunk, buf, within, len);
 }

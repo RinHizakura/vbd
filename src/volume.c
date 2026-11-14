@@ -130,7 +130,7 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 	}
 	if ((err = log_load(&v->data, sb.chunk_size, nchunks, v->at)))
 		goto fail;
-	if (!writable(v) && v->at >= v->data.epoch) {
+	if (!writable(v) && v->at >= log_epoch(&v->data)) {
 		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
 		goto fail;
 	}
@@ -164,10 +164,8 @@ int vbd_base_err(const struct vbd *v)		{ return cache_err(v->cache); }
 static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		      uint32_t within, uint32_t len)
 {
-	void *e = xa_load(&v->data.map, chunk);
-
-	if (e)
-		return log_read(&v->data, xa_to_value(e), buf, within, len);
+	if (log_has(&v->data, chunk))
+		return log_read(&v->data, chunk, buf, within, len);
 	return cache_read(v->cache, chunk, buf, within, len);
 }
 
@@ -251,7 +249,7 @@ int vbd_flush(struct vbd *v)
 	return log_sync(&v->data);
 }
 
-uint64_t vbd_epoch(const struct vbd *v)		{ return v->data.epoch; }
+uint64_t vbd_epoch(const struct vbd *v)		{ return log_epoch(&v->data); }
 
 int vbd_snapshot(struct vbd *v)
 {
