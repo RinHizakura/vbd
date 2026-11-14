@@ -15,18 +15,23 @@
 
 #define BUF_SIZE	(1 << 20)
 
-static const char *usage_text =
-	"usage: vbd <command> <log> ...\n"
-	"  create <log> <size> <chunk> [base]  new volume; sizes take K, M, G suffixes\n"
-	"  info   <log> [snapshot]             print size, chunk size, epoch, chunks fetched, base state\n"
-	"  read   <log> <off> <len> [snapshot] copy a range to stdout, as of a snapshot if given\n"
-	"  write  <log> <off>                  copy stdin to the volume and flush\n"
-	"  snapshot <log>                      freeze the current content; prints the snapshot number\n"
-	"  serve  <log> [snapshot]             expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root\n";
+struct cmd {
+	const char *name, *args, *help;
+	int min, max;		/* how many arguments follow <log> */
+	bool at;		/* the optional last one is a snapshot to open the volume at */
+	/* exactly one of the two: */
+	int (*make)(const char *log, char **args, int n);	/* works on the path */
+	int (*run)(struct vbd *v, const uint64_t *n, bool at);	/* on the open volume; the
+								 * arguments are numbers */
+};
+
+static const struct cmd cmds[];
 
 static int usage(void)
 {
-	fputs(usage_text, stderr);
+	fputs("usage: vbd <command> <log> ...\n", stderr);
+	for (const struct cmd *c = cmds; c->name; c++)
+		fprintf(stderr, "  %-8s <log> %-23s %s\n", c->name, c->args, c->help);
 	return 2;
 }
 
@@ -49,16 +54,15 @@ static int parse_size(const char *s, uint64_t *out)
 	return 0;
 }
 
-static int cmd_create(const char *log, const char *size_s, const char *chunk_s,
-		      const char *base)
+static int cmd_create(const char *log, char **args, int n)
 {
 	uint64_t size, chunk;
 	int ret;
 
-	if (parse_size(size_s, &size) || parse_size(chunk_s, &chunk) ||
+	if (parse_size(args[0], &size) || parse_size(args[1], &chunk) ||
 	    chunk > UINT32_MAX)
 		return usage();
-	ret = vbd_create(log, size, chunk, base);
+	ret = vbd_create(log, size, chunk, n > 2 ? args[2] : NULL);
 	if (ret) {
 		fprintf(stderr, "vbd create: %s\n", strerror(-ret));
 		return 1;
@@ -66,7 +70,7 @@ static int cmd_create(const char *log, const char *size_s, const char *chunk_s,
 	return 0;
 }
 
-static int cmd_info(struct vbd *v)
+static int cmd_info(struct vbd *v, const uint64_t *n, bool at)
 {
 	printf("size %" PRIu64 "\nchunk %" PRIu32 "\nepoch %" PRIu64 "\nfetched %" PRIu64 "\n",
 	       vbd_size(v), vbd_chunk_size(v), vbd_epoch(v), vbd_fetched(v));
@@ -75,13 +79,14 @@ static int cmd_info(struct vbd *v)
 	return 0;
 }
 
-static int cmd_read(struct vbd *v, uint64_t off, uint64_t len)
+static int cmd_read(struct vbd *v, const uint64_t *n, bool at)
 {
+	uint64_t off = n[0], len = n[1];
 	uint8_t *buf = malloc(BUF_SIZE);
 
 	while (len) {
-		size_t n = len < BUF_SIZE ? len : BUF_SIZE;
-		ssize_t got = vbd_read(v, buf, n, off);
+		size_t want = len < BUF_SIZE ? len : BUF_SIZE;
+		ssize_t got = vbd_read(v, buf, want, off);
 
 		if (got < 0) {
 			fprintf(stderr, "vbd read: %s\n", strerror(-got));
@@ -101,7 +106,7 @@ static int cmd_read(struct vbd *v, uint64_t off, uint64_t len)
 	return 0;
 }
 
-static int cmd_snapshot(struct vbd *v)
+static int cmd_snapshot(struct vbd *v, const uint64_t *n, bool at)
 {
 	uint64_t frozen = vbd_epoch(v);
 	int ret = vbd_snapshot(v);
@@ -114,9 +119,9 @@ static int cmd_snapshot(struct vbd *v)
 	return 0;
 }
 
-static int cmd_serve(struct vbd *v, bool readonly)
+static int cmd_serve(struct vbd *v, const uint64_t *n, bool at)
 {
-	int ret = ublk_serve(v, readonly);
+	int ret = ublk_serve(v, at);	/* a snapshot is served read-only */
 
 	if (ret) {
 		fprintf(stderr, "vbd serve: %s\n", strerror(-ret));
@@ -125,14 +130,15 @@ static int cmd_serve(struct vbd *v, bool readonly)
 	return 0;
 }
 
-static int cmd_write(struct vbd *v, uint64_t off)
+static int cmd_write(struct vbd *v, const uint64_t *n, bool at)
 {
 	uint8_t *buf = malloc(BUF_SIZE);
-	size_t n;
+	uint64_t off = n[0];
+	size_t got;
 	int ret = 0;
 
-	while ((n = fread(buf, 1, BUF_SIZE, stdin)) > 0) {
-		ssize_t put = vbd_write(v, buf, n, off);
+	while ((got = fread(buf, 1, BUF_SIZE, stdin)) > 0) {
+		ssize_t put = vbd_write(v, buf, got, off);
 
 		if (put < 0) {
 			fprintf(stderr, "vbd write: %s\n", strerror(-put));
@@ -140,7 +146,7 @@ static int cmd_write(struct vbd *v, uint64_t off)
 			goto out;
 		}
 		off += put;
-		if ((size_t)put < n) {
+		if ((size_t)put < got) {
 			fputs("vbd write: input runs past the end of the volume\n", stderr);
 			ret = 1;
 			goto out;
@@ -157,60 +163,53 @@ out:
 	return ret;
 }
 
+static const struct cmd cmds[] = {
+	{ "create", "<size> <chunk> [base]", "new volume; sizes take K, M, G suffixes",
+	  2, 3, .make = cmd_create },
+	{ "info", "[snapshot]", "print size, chunk size, epoch, chunks fetched, base state",
+	  0, 1, .at = true, .run = cmd_info },
+	{ "read", "<off> <len> [snapshot]", "copy a range to stdout, as of a snapshot if given",
+	  2, 3, .at = true, .run = cmd_read },
+	{ "write", "<off>", "copy stdin to the volume and flush",
+	  1, 1, .run = cmd_write },
+	{ "snapshot", "", "freeze the current content; prints the snapshot number",
+	  0, 0, .run = cmd_snapshot },
+	{ "serve", "[snapshot]", "expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root",
+	  0, 1, .at = true, .run = cmd_serve },
+	{ NULL }
+};
+#define MAX_ARGS	3	/* the largest max above */
+
 int main(int argc, char **argv)
 {
-	const char *cmd, *log;
+	const struct cmd *c = cmds;
+	uint64_t n[MAX_ARGS] = { 0 };
+	const char *log;
 	struct vbd *v;
-	uint64_t off, len, at = 0;
-	bool have_at = false;
-	int ret;
+	int nargs = argc - 3, ret;
+	bool at;
 
 	if (argc < 3)
 		return usage();
-	cmd = argv[1]; log = argv[2];
-	argc -= 2; argv += 2;
-
-	if (!strcmp(cmd, "create")) {
-		if (argc != 3 && argc != 4)
-			return usage();
-		return cmd_create(log, argv[1], argv[2], argc == 4 ? argv[3] : NULL);
-	}
-
-	if (!strcmp(cmd, "info") || !strcmp(cmd, "serve")) {
-		have_at = argc == 2;
-		if (argc > 2 || (have_at && parse_size(argv[1], &at)))
-			return usage();
-	} else if (!strcmp(cmd, "snapshot")) {
-		if (argc != 1)
-			return usage();
-	} else if (!strcmp(cmd, "read")) {
-		have_at = argc == 4;
-		if (argc < 3 || argc > 4 || parse_size(argv[1], &off) || parse_size(argv[2], &len) ||
-		    (have_at && parse_size(argv[3], &at)))
-			return usage();
-	} else if (!strcmp(cmd, "write")) {
-		if (argc != 2 || parse_size(argv[1], &off))
-			return usage();
-	} else {
+	while (c->name && strcmp(c->name, argv[1]))
+		c++;
+	if (!c->name || nargs < c->min || nargs > c->max)
 		return usage();
-	}
+	log = argv[2];
+	if (c->make)
+		return c->make(log, argv + 3, nargs);
+	for (int i = 0; i < nargs; i++)
+		if (parse_size(argv[3 + i], &n[i]))
+			return usage();
+	at = c->at && nargs == c->max;
 
 	rcu_register_thread();
-	v = have_at ? vbd_open_at(log, at) : vbd_open(log);
+	v = at ? vbd_open_at(log, n[nargs - 1]) : vbd_open(log);
 	if (!v) {
 		fprintf(stderr, "vbd: %s: %s\n", log, strerror(errno));
 		return 1;
 	}
-	if (!strcmp(cmd, "info"))
-		ret = cmd_info(v);
-	else if (!strcmp(cmd, "read"))
-		ret = cmd_read(v, off, len);
-	else if (!strcmp(cmd, "snapshot"))
-		ret = cmd_snapshot(v);
-	else if (!strcmp(cmd, "serve"))
-		ret = cmd_serve(v, have_at);
-	else
-		ret = cmd_write(v, off);
+	ret = c->run(v, n, at);
 	vbd_close(v);
 	return ret;
 }
