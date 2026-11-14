@@ -65,8 +65,9 @@ struct log {
 };
 
 /*
- * Life of a log: init, open, load, then append / read / snapshot / sync as
- * needed, close. close is safe after init at any point.
+ * Life of a log: init, open, lock if it is to be written, load, then
+ * append / read / snapshot / sync as needed, close. close is safe after
+ * init at any point.
  */
 /* Create @path holding only the SUPER_SIZE bytes at @super; fails if it exists. */
 int log_create(const char *path, const void *super);
@@ -74,6 +75,13 @@ int log_create(const char *path, const void *super);
 void log_init(struct log *l);
 /* Open @path and copy its first SUPER_SIZE bytes to @super. 0 or -errno. */
 int log_open(struct log *l, const char *path, void *super);
+
+/*
+ * Claim the open log for writing, before loading it. -EBUSY if another open
+ * of the same file, in this process or any other, holds the claim; it lasts
+ * until close. A view needs none and can be loaded beside the writer.
+ */
+int log_lock(struct log *l);
 
 /*
  * Build the map from the file, given the geometry the super block

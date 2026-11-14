@@ -475,6 +475,26 @@ static void test_open_at(void)
  * (test_bad_record). What was appended after the checkpoint is replayed on
  * top of it, and a damaged checkpoint means a full replay.
  */
+/* One writer at a time; views of a snapshot are welcome beside it. */
+static void test_one_writer(void)
+{
+	struct vbd *v = setup(), *view;
+
+	fill_random(buf, CHUNK);
+	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);
+	memcpy(ref, buf, CHUNK);
+	assert(vbd_snapshot(v) == 0);
+	assert(vbd_open(log_path) == NULL && errno == EBUSY);
+	view = vbd_open_at(log_path, 0);
+	assert(view);
+	check_all(view);
+	vbd_close(view);
+	vbd_close(v);
+	v = vbd_open(log_path);			/* free again once the writer is gone */
+	assert(v);
+	teardown(v);
+}
+
 /*
  * A view leaves the file as it finds it: what looks like a torn tail may be
  * a record another process is still writing. That holds when the view is
@@ -662,6 +682,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
+	RUN(test_one_writer);
 	RUN(test_view_keeps_tail);
 	RUN(test_checkpoint);
 	RUN(test_cache_checkpoint);

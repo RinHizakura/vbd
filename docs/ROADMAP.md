@@ -31,6 +31,9 @@ Done:
   across reopen and a torn record
 - CLI: `vbd create | info | read | write`; `write` flushes before exit;
   `tests/cli_test.sh` drives it end to end
+- one writer per volume: a writable open takes an exclusive `flock` on the
+  log and a second one gets EBUSY. A snapshot view takes no lock and
+  changes nothing in the file, so it can be open beside the writer.
 - crash test: `tests/crash_test.sh` SIGKILLs a writer loop at random
   moments; the volume must reopen with whole records only and every chunk
   either base content or a value written in full
@@ -133,4 +136,3 @@ Remaining:
   checkpoint periodically or add shrinking
 - whether the mapping layer should move to a Rust XArray once one lands in
   the kernel
-- nothing stops two processes from opening one volume for writing

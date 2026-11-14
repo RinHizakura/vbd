@@ -40,6 +40,8 @@ while [ $round -lt "$ROUNDS" ]; do
 	sleep 0.$(od -An -N1 -tu1 /dev/urandom | tr -d ' ')
 	kill -s KILL -- -$pid	# the whole group: loop shell and the vbd child
 	wait $pid 2>/dev/null || true
+	# the vbd child is not ours to wait for, and it holds the volume until it is gone
+	while kill -s 0 -- -$pid 2>/dev/null; do sleep 0.01; done
 
 	before=$(stat -c %s t.log)
 	"$VBD" info t.log >/dev/null || fail "round $round: reopen"	# replays, drops a torn tail

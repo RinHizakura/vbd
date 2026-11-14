@@ -116,6 +116,8 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 		err = -EINVAL;
 		goto fail;
 	}
+	if (writable(v) && (err = log_lock(&v->data)))
+		goto fail;	/* someone else is writing it */
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
 	nchunks = sb.size / sb.chunk_size;

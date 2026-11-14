@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -147,6 +148,13 @@ static int log_replay(struct log *l)
 out:
 	free(data);
 	return ret;
+}
+
+int log_lock(struct log *l)
+{
+	if (!flock(l->fd, LOCK_EX | LOCK_NB))
+		return 0;
+	return errno == EWOULDBLOCK ? -EBUSY : -errno;
 }
 
 int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto)

@@ -35,12 +35,17 @@ struct vbd;
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path);
 
-/* Open a log and its base. Returns NULL and sets errno. */
+/*
+ * Open a log and its base, for reading and writing. One open at a time: a
+ * second one, in any process, fails with EBUSY until the first is closed.
+ * Returns NULL and sets errno.
+ */
 struct vbd *vbd_open(const char *log_path);
 
 /*
  * Open the volume as it was when snapshot @snapshot was taken: a read-only
  * view, writes and snapshots return -EROFS. ENOENT if no such snapshot.
+ * Views can be open while the volume is open for writing.
  */
 struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot);
 void vbd_close(struct vbd *v);

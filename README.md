@@ -91,6 +91,11 @@ chunks: one chunk of log space for a small volume. Reading as of a
 snapshot never changes the volume, and does not get slower with how much
 was written before it.
 
+One process at a time can have a volume open for writing. While it is
+being served, `vbd info`, `vbd write`, `vbd snapshot` and a `vbd read`
+without a snapshot number report that it is busy; reading as of a snapshot
+still works.
+
 A volume survives a crash of the process writing it: a write that was cut
 short is dropped on the next open, everything before it is kept.
 
