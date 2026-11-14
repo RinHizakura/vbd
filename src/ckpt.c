@@ -17,7 +17,6 @@
 #include <unistd.h>
 
 #include "ckpt.h"
-#include "crc32c.h"
 
 /*
  * Checkpoint once this many bytes of log would have to be replayed. Replay
@@ -55,7 +54,6 @@ static int put_part(struct log *l, struct ckpt_hdr *h, uint64_t *ent)
 {
 	int ret;
 
-	h->crc = crc32c(0, ent, l->chunk_size);
 	ret = rec_write(l, h, ent);
 	if (ret)
 		return ret;
@@ -126,14 +124,11 @@ static bool ckpt_read(struct log *l, uint64_t first, uint32_t parts)
 	bool ok = ent != NULL;
 
 	for (uint32_t p = 0; ok && p < parts; p++) {
-		uint64_t off = rec_off(l, first + p);
 		struct ckpt_hdr h;
 
-		ok = !full_pread(l->fd, &h, sizeof(h), off) &&
-		     !full_pread(l->fd, ent, l->chunk_size, off + HDR_SIZE) &&
-		     h.magic == CKPT_MAGIC &&
+		ok = !rec_read_hdr(l, first + p, &h) && h.magic == CKPT_MAGIC &&
 		     h.part == p && h.parts == parts && h.count <= per &&
-		     h.crc == crc32c(0, ent, l->chunk_size);
+		     !rec_read_data(l, first + p, &h, ent);
 		for (uint64_t i = 0; ok && i < h.count; i++)
 			ok = ent[2 * i] < l->nchunks && ent[2 * i + 1] < first &&
 			     !log_map(l, ent[2 * i], ent[2 * i + 1]);
@@ -167,7 +162,7 @@ bool ckpt_load(struct log *l)
 	for (rec = (st.st_size - SUPER_SIZE) / (HDR_SIZE + l->chunk_size); rec-- > 0; ) {
 		uint64_t epoch;
 
-		if (full_pread(l->fd, &h, sizeof(h), rec_off(l, rec)))
+		if (rec_read_hdr(l, rec, &h))
 			return false;
 		if (h.magic == VBD_MAGIC)
 			epoch = ((struct rec_hdr *)&h)->epoch;

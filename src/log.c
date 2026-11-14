@@ -19,7 +19,8 @@ uint64_t rec_off(const struct log *l, uint64_t rec)
 	return SUPER_SIZE + rec * (HDR_SIZE + (uint64_t)l->chunk_size);
 }
 
-int full_pread(int fd, void *buf, size_t len, uint64_t off)
+/* pread all of it; past the end of the file reads as zeros. 0 or -errno. */
+static int full_pread(int fd, void *buf, size_t len, uint64_t off)
 {
 	uint8_t *p = buf;
 
@@ -123,9 +124,8 @@ static int log_replay(struct log *l)
 	}
 	for (; rec_off(l, l->nrec + 1) <= (uint64_t)st.st_size; l->nrec++) {
 		struct rec_hdr h;
-		uint64_t off = rec_off(l, l->nrec);
 
-		if ((ret = full_pread(l->fd, &h, sizeof(h), off)))
+		if ((ret = rec_read_hdr(l, l->nrec, &h)))
 			goto out;
 		/*
 		 * A checkpoint record says nothing a replay needs, so it is
@@ -136,12 +136,15 @@ static int log_replay(struct log *l)
 			l->ckpt_nrec = l->nrec + 1;	/* someone's checkpoint ends here */
 			continue;
 		}
-		if ((ret = full_pread(l->fd, data, l->chunk_size, off + HDR_SIZE)))
-			goto out;
-		if (h.magic != VBD_MAGIC ||
-		    h.chunk >= l->nchunks ||
-		    h.crc != crc32c(0, data, l->chunk_size))
+		if (h.magic != VBD_MAGIC || h.chunk >= l->nchunks)
 			break;		/* torn tail */
+		ret = rec_read_data(l, l->nrec, &h, data);
+		if (ret == -EBADMSG) {
+			ret = 0;
+			break;		/* torn tail */
+		}
+		if (ret)
+			goto out;
 		if (h.epoch > l->epoch)
 			l->epoch = h.epoch;
 		if (h.epoch > l->upto)
@@ -201,13 +204,31 @@ int log_sync(struct log *l)
 	return fdatasync(l->fd) ? -errno : 0;
 }
 
-int rec_write(struct log *l, const void *hdr, const void *data)
+int rec_read_hdr(struct log *l, uint64_t rec, void *hdr)
+{
+	return full_pread(l->fd, hdr, HDR_SIZE, rec_off(l, rec));
+}
+
+int rec_read_data(struct log *l, uint64_t rec, const void *hdr, void *data)
+{
+	const struct hdr_start *h = hdr;
+	int ret = full_pread(l->fd, data, l->chunk_size, rec_off(l, rec) + HDR_SIZE);
+
+	if (!ret && h->crc != crc32c(0, data, l->chunk_size))
+		ret = -EBADMSG;
+	return ret;
+}
+
+int rec_write(struct log *l, void *hdr, const void *data)
 {
 	struct iovec iov[2] = {
-		{ .iov_base = (void *)hdr, .iov_len = HDR_SIZE },
+		{ .iov_base = hdr, .iov_len = HDR_SIZE },
 		{ .iov_base = (void *)data, .iov_len = l->chunk_size },
 	};
-	ssize_t n = pwritev(l->fd, iov, 2, rec_off(l, l->nrec));
+	ssize_t n;
+
+	((struct hdr_start *)hdr)->crc = crc32c(0, data, l->chunk_size);
+	n = pwritev(l->fd, iov, 2, rec_off(l, l->nrec));
 
 	if (n == (ssize_t)(HDR_SIZE + l->chunk_size))
 		return 0;
@@ -216,8 +237,7 @@ int rec_write(struct log *l, const void *hdr, const void *data)
 
 int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 {
-	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk,
-			     .crc = crc32c(0, data, l->chunk_size) };
+	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk };
 	int ret;
 
 	pthread_mutex_lock(&l->append_lock);

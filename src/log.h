@@ -38,9 +38,15 @@
 /* A record has to hold at least one map entry: checkpoints are made of them. */
 #define MIN_CHUNK_SIZE	16
 
-struct rec_hdr {
-	uint32_t magic;
+/* How every record header starts, whatever its kind. */
+struct hdr_start {
+	uint32_t magic;		/* which kind */
 	uint32_t crc;		/* crc32c of the data that follows */
+};
+
+struct rec_hdr {
+	uint32_t magic;		/* VBD_MAGIC */
+	uint32_t crc;
 	uint64_t chunk;
 	uint64_t epoch;		/* snapshots taken before this record was written */
 	uint8_t  pad[HDR_SIZE - 24];
@@ -138,9 +144,17 @@ int log_fd(const struct log *l);
 /* Point @chunk at record @rec in the map. 0 or -errno. */
 int log_map(struct log *l, uint64_t chunk, uint64_t rec);
 uint64_t rec_off(const struct log *l, uint64_t rec);
-/* Write a header of any kind and @data as record l->nrec; append_lock held. */
-int rec_write(struct log *l, const void *hdr, const void *data);
-/* pread all of it; past the end of the file reads as zeros. 0 or -errno. */
-int full_pread(int fd, void *buf, size_t len, uint64_t off);
+/*
+ * Write a header of any kind and @data as record l->nrec, after putting
+ * the data's crc in the header; append_lock held.
+ */
+int rec_write(struct log *l, void *hdr, const void *data);
+/* Read the header of record @rec, of whatever kind, into HDR_SIZE bytes at @hdr. */
+int rec_read_hdr(struct log *l, uint64_t rec, void *hdr);
+/*
+ * Read the data of record @rec, whose header is @hdr. -EBADMSG if it is
+ * not what the header's crc says: a record that was never written whole.
+ */
+int rec_read_data(struct log *l, uint64_t rec, const void *hdr, void *data);
 
 #endif /* VBD_LOG_H */
