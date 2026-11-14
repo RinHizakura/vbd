@@ -163,13 +163,60 @@ One request, by tag:
  record (64 B header + chunk_size B data)
  +-------+-------+-------+-------+----------+------------------------------------+
  | magic | crc   | chunk | epoch | pad      | data: exactly chunk_size bytes     |
- | u32   | u32   | u64   | u64   | 40 B     |                                    |
+ | "vbd1"| u32   | u64   | u64   | 40 B     |                                    |
  +-------+-------+-------+-------+----------+------------------------------------+
            ^ crc covers the data               epoch: snapshots taken before this write
 
  A snapshot appends a record with chunk = 2^64 - 1 and the new epoch; it
  persists the epoch and is never entered in the map.
+
+ checkpoint record (the same size, a header of its own kind)
+ +-------+-------+-------+------+-------+-------+------+-----------------------------+
+ | magic | crc   | epoch | part | parts | count | pad  | data: count map entries,    |
+ | "vbck"| u32   | u64   | u32  | u32   | u64   | 32 B | (chunk, record) as two u64  |
+ +-------+-------+-------+------+-------+-------+------+-----------------------------+
+
+ Every header is 64 bytes and starts with magic and crc; the magic says how
+ to read the rest. A checkpoint is `parts` consecutive checkpoint records
+ holding the whole map in chunk order, `count` entries in each. It covers
+ every record before its part 0.
 ```
 
 A record always carries a whole chunk, even for a one-byte write. That costs
-write amplification and buys a format with no index on disk.
+write amplification and buys a format with no index the log depends on.
+
+The checkpoint is an index, but a disposable one, and it lives in the log
+like everything else: a volume is one file and appending is the only way
+it is written.
+
+```
+ disk.log
+ +-------+-------+-------+ ... +-------+----------+----------+-------+-------+
+ | super | rec 0 | rec 1 |     | rec k | ckpt 0/2 | ckpt 1/2 | rec   | rec   |
+ +-------+-------+-------+ ... +-------+----------+----------+-------+-------+
+          \_____ covered: not read at open ____/  \_ loaded _/ \_ replayed _/
+```
+
+Open walks the 64-byte headers back from the end of the file until it
+meets the last part of a checkpoint whose parts all verify, loads the map
+from it and replays the records after it. With no checkpoint, or only torn
+ones, it replays from record 0 as before. A snapshot view always replays
+everything, since a checkpoint holds the newest map.
+
+It is written at flush and at close, after an `fdatasync` so that it never
+describes records a power cut can still take, and only when 64 MiB of
+records have piled up behind the last one (about a tenth of a second of
+replay, see below) and at least four times as many records as that
+one took: the log never shrinks, so checkpoints must stay a small part of
+it. The cache has no checkpoint yet.
+
+Replay reads and checksums every byte of every record, so its cost goes by
+bytes, not records. Measured on the development machine, opening a log
+with no checkpoint, from the page cache:
+
+```
+ chunk    records   log size    open
+ 4 KiB    4000      15 MiB      0.03 s
+ 64 KiB   4000      250 MiB     0.46 s
+ 1 MiB    1000      1000 MiB    1.83 s      about 540 MiB/s throughout
+```

@@ -35,10 +35,16 @@ Done:
   moments; the volume must reopen with whole records only and every chunk
   either base content or a value written in full
 
-Remaining:
-
-- checkpoint: sorted `(chunk, record)` array written at `flush`, so reopen
-  does not have to re-read the whole log; only needed once replay is slow
+- checkpoint: the map as a sorted `(chunk, record)` array, appended to the
+  log itself as a run of records with a header of their own (magic
+  `vbck`), so the volume stays one file. Open walks the record headers
+  back from the end to the last complete checkpoint, loads it and replays
+  only what follows. Written
+  at `flush` and at close, once 64 MiB of records have piled up and at least
+  four times what the previous checkpoint took, because a checkpoint stays
+  in the log for good. Covered records are not checksummed again on open:
+  that is the time it saves. Not yet: the cache has none, and a snapshot
+  view still replays the whole log (P3).
 
 ## P2: lazy fetch
 
@@ -116,8 +122,10 @@ Remaining:
 
 ## Open questions
 
-- metadata durability ordering between log fsync, checkpoint rename and
-  manifest update
+- metadata durability ordering between log fsync and manifest update. The
+  checkpoint is settled: it is appended to the log after an `fdatasync`,
+  so it only describes records that are already durable, and one that is
+  torn is skipped for the one before it.
 - node memory: the XArray only grows; decide whether to rebuild from
   checkpoint periodically or add shrinking
 - whether the mapping layer should move to a Rust XArray once one lands in

@@ -17,6 +17,13 @@
  * The super block names the base image (a local path or an http(s) URL) and
  * remembers its size and a validator from the backend (base/base.h), so a log is
  * never paired with the wrong base by mistake.
+ *
+ * Now and then the data log's map is appended to the log itself, as a run
+ * of checkpoint records: same size as any record, but with a header of
+ * their own kind, told apart by its magic. Open looks for the last complete
+ * run from the end of the file, takes the map from it and replays only what
+ * follows. The volume stays one file, and append stays the only way it is
+ * written.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -37,11 +44,20 @@
 #include "crc32c.h"
 #include "base/base.h"
 
-#define VBD_MAGIC	0x31646276u	/* "vbd1" */
+#define VBD_MAGIC	0x31646276u	/* "vbd1": super block, data record, snapshot marker */
+#define CKPT_MAGIC	0x6b636276u	/* "vbck": checkpoint record */
 #define VBD_VERSION	1
 #define HDR_SIZE	64
 #define SUPER_SIZE	4096
 #define CACHE_SUFFIX	".cache"
+
+/*
+ * Checkpoint once this many bytes of log would have to be replayed. Replay
+ * reads and checksums every byte: about 540 MiB/s from the page cache on
+ * the machine this was measured on, whatever the chunk size, so this bounds
+ * an open after a crash to roughly a tenth of a second there.
+ */
+#define CKPT_BYTES	(64u << 20)
 
 struct super {
 	uint32_t crc;		/* crc32c of everything after this field */
@@ -62,6 +78,26 @@ struct rec_hdr {
 	uint8_t  pad[HDR_SIZE - 24];
 };
 
+/*
+ * Header of a checkpoint record. Every kind of header is HDR_SIZE bytes and
+ * starts with magic and crc; the magic says which kind the rest is.
+ *
+ * A checkpoint is the whole map, sorted by chunk, cut into as many
+ * consecutive records as it takes. It covers every record before its
+ * part 0.
+ */
+struct ckpt_hdr {
+	uint32_t magic;		/* CKPT_MAGIC */
+	uint32_t crc;		/* crc32c of the data that follows */
+	uint64_t epoch;		/* the log's epoch when it was written */
+	uint32_t part;		/* this record is part @part ... */
+	uint32_t parts;		/* ... of @parts */
+	uint64_t count;		/* map entries in the data: (chunk, record) as two uint64_t */
+	uint8_t  pad[HDR_SIZE - 32];
+};
+_Static_assert(sizeof(struct rec_hdr) == HDR_SIZE && sizeof(struct ckpt_hdr) == HDR_SIZE,
+	       "record headers");
+
 /* An append-only file of records plus the map that indexes it. */
 /*
  * A snapshot appends a record with this chunk number. It carries the new
@@ -78,6 +114,8 @@ struct rec_hdr {
 struct log {
 	int fd;
 	uint64_t nrec;		/* records in the file; next append goes here */
+	uint64_t ckpt_nrec;	/* nrec right after the last checkpoint */
+	uint32_t ckpt_parts;	/* records that checkpoint took */
 	struct xarray map;	/* chunk -> xa_mk_value(record number) */
 	pthread_mutex_t append_lock;
 	uint64_t epoch;		/* what new records are stamped with; 0 for the cache */
@@ -87,6 +125,7 @@ struct vbd {
 	uint64_t size;
 	uint32_t chunk_size;
 	uint64_t rec_size;	/* HDR_SIZE + chunk_size */
+	bool ready;		/* open finished; the maps describe the files */
 	const struct base_ops *base_ops;	/* NULL: all-zero base */
 	void *base;		/* NULL while base_ops is set: base unreachable, offline */
 	int base_err;		/* why the base is unreachable, 0 when it is open */
@@ -104,6 +143,12 @@ struct vbd {
  */
 static int inflight;
 #define INFLIGHT	((void *)&inflight)
+
+/* Opened with vbd_open: the newest content, writable. Not a snapshot view. */
+static bool writable(const struct vbd *v)
+{
+	return v->at == LIVE;
+}
 
 static uint64_t rec_off(const struct vbd *v, uint64_t rec)
 {
@@ -233,7 +278,10 @@ static int log_open(struct log *l, const char *path, struct super *sb)
 	return super_valid(sb) ? 0 : -EINVAL;
 }
 
-/* Rebuild the map from the file. Later records override earlier ones. */
+/*
+ * Bring the map up to date with the file, from record l->nrec on (0, or
+ * just past the checkpoint). Later records override earlier ones.
+ */
 static int log_replay(struct vbd *v, struct log *l)
 {
 	struct stat st;
@@ -246,12 +294,20 @@ static int log_replay(struct vbd *v, struct log *l)
 		ret = -errno;
 		goto out;
 	}
-	for (l->nrec = 0; rec_off(v, l->nrec + 1) <= (uint64_t)st.st_size; l->nrec++) {
+	for (; rec_off(v, l->nrec + 1) <= (uint64_t)st.st_size; l->nrec++) {
 		struct rec_hdr h;
 		uint64_t off = rec_off(v, l->nrec);
 
-		if ((ret = full_pread(l->fd, &h, sizeof(h), off)) ||
-		    (ret = full_pread(l->fd, data, v->chunk_size, off + HDR_SIZE)))
+		if ((ret = full_pread(l->fd, &h, sizeof(h), off)))
+			goto out;
+		/*
+		 * A checkpoint record says nothing a replay needs, so it is
+		 * passed over unread: damage to one must not cost the records
+		 * that follow it.
+		 */
+		if (h.magic == CKPT_MAGIC)
+			continue;
+		if ((ret = full_pread(l->fd, data, v->chunk_size, off + HDR_SIZE)))
 			goto out;
 		if (h.magic != VBD_MAGIC ||
 		    (h.chunk >= v->size / v->chunk_size && h.chunk != SNAP_MARK) ||
@@ -273,33 +329,167 @@ out:
 	return ret;
 }
 
+/*
+ * Write a header of either kind and @data as record l->nrec. The caller
+ * holds l->append_lock.
+ */
+static int rec_write(struct vbd *v, struct log *l, const void *hdr, const void *data)
+{
+	struct iovec iov[2] = {
+		{ .iov_base = (void *)hdr, .iov_len = HDR_SIZE },
+		{ .iov_base = (void *)data, .iov_len = v->chunk_size },
+	};
+	ssize_t n = pwritev(l->fd, iov, 2, rec_off(v, l->nrec));
+
+	if (n == (ssize_t)v->rec_size)
+		return 0;
+	return n < 0 ? -errno : -ENOSPC;	/* a short write is a full disk */
+}
+
 /* Append one whole chunk and publish it in the map. */
 static int log_append(struct vbd *v, struct log *l, uint64_t chunk, const uint8_t *data)
 {
 	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk,
 			     .crc = crc32c(0, data, v->chunk_size) };
-	struct iovec iov[2] = {
-		{ .iov_base = &h, .iov_len = sizeof(h) },
-		{ .iov_base = (void *)data, .iov_len = v->chunk_size },
-	};
-	uint64_t rec;
-	int ret = 0;
+	int ret;
 
 	pthread_mutex_lock(&l->append_lock);
-	rec = l->nrec;
 	h.epoch = l->epoch;
-	if (pwritev(l->fd, iov, 2, rec_off(v, rec)) != (ssize_t)v->rec_size) {
-		ret = -errno;
-		goto out;
-	}
+	ret = rec_write(v, l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
-	if (chunk != SNAP_MARK)
-		ret = xa_err(xa_store(&l->map, chunk, xa_mk_value(rec), GFP_KERNEL));
+	if (!ret && chunk != SNAP_MARK)
+		ret = xa_err(xa_store(&l->map, chunk, xa_mk_value(l->nrec), GFP_KERNEL));
 	if (!ret)
 		l->nrec++;
-out:
 	pthread_mutex_unlock(&l->append_lock);
 	return ret;
+}
+
+/*
+ * Append the map of @l to its own file as a checkpoint. The caller holds
+ * l->append_lock, which keeps the map still and the parts together.
+ */
+static int ckpt_write(struct vbd *v, struct log *l)
+{
+	uint64_t per = v->chunk_size / (2 * sizeof(uint64_t));	/* entries in one record */
+	uint64_t n = 0, first = l->nrec, *ent;
+	struct ckpt_hdr h = { .magic = CKPT_MAGIC, .epoch = l->epoch };
+	unsigned long chunk;
+	void *e;
+	int ret = 0;
+
+	xa_for_each(&l->map, chunk, e)
+		n++;
+	if (!per || !n || (n + per - 1) / per > UINT32_MAX)
+		return 0;	/* nothing to save, or records too small to hold it */
+	h.parts = (n + per - 1) / per;
+	ent = calloc(1, v->chunk_size);
+	if (!ent)
+		return -ENOMEM;
+	/* a checkpoint must not describe records a power cut can still take */
+	if (fdatasync(l->fd))
+		ret = -errno;
+	xa_for_each(&l->map, chunk, e) {
+		if (ret)
+			break;
+		ent[2 * h.count] = chunk;
+		ent[2 * h.count + 1] = xa_to_value(e);
+		n--;
+		if (++h.count < per && n)
+			continue;
+		/* the record is full, or that was the last entry */
+		h.crc = crc32c(0, ent, v->chunk_size);
+		ret = rec_write(v, l, &h, ent);
+		l->nrec++;
+		h.part++;
+		h.count = 0;
+		memset(ent, 0, v->chunk_size);
+	}
+	free(ent);
+	if (ret) {
+		/* half a checkpoint is no checkpoint: take it back */
+		l->nrec = first;
+		if (ftruncate(l->fd, rec_off(v, first)))
+			ret = -errno;
+		return ret;
+	}
+	l->ckpt_nrec = l->nrec;
+	l->ckpt_parts = h.parts;
+	return 0;
+}
+
+/* Fill the map from the checkpoint in records [first, first + parts). */
+static bool ckpt_read(struct vbd *v, struct log *l, uint64_t first, uint32_t parts)
+{
+	uint64_t per = v->chunk_size / (2 * sizeof(uint64_t));
+	uint64_t nchunks = v->size / v->chunk_size;
+	uint64_t *ent = malloc(v->chunk_size);
+	bool ok = ent != NULL;
+
+	for (uint32_t p = 0; ok && p < parts; p++) {
+		uint64_t off = rec_off(v, first + p);
+		struct ckpt_hdr h;
+
+		ok = !full_pread(l->fd, &h, sizeof(h), off) &&
+		     !full_pread(l->fd, ent, v->chunk_size, off + HDR_SIZE) &&
+		     h.magic == CKPT_MAGIC &&
+		     h.part == p && h.parts == parts && h.count <= per &&
+		     h.crc == crc32c(0, ent, v->chunk_size);
+		for (uint64_t i = 0; ok && i < h.count; i++)
+			ok = ent[2 * i] < nchunks && ent[2 * i + 1] < first &&
+			     !xa_err(xa_store(&l->map, ent[2 * i],
+					      xa_mk_value(ent[2 * i + 1]), GFP_KERNEL));
+	}
+	free(ent);
+	if (!ok)
+		xa_destroy(&l->map);	/* empty again */
+	return ok;
+}
+
+/*
+ * Start @l from its last complete checkpoint, found by walking the record
+ * headers back from the end of the file; with none, leave it empty for a
+ * replay from the first record. The records a checkpoint covers are not
+ * read again, so their checksums are not re-verified: that is the time it
+ * saves.
+ */
+static void ckpt_load(struct vbd *v, struct log *l)
+{
+	struct ckpt_hdr h;
+	struct stat st;
+	uint64_t rec;
+
+	if (fstat(l->fd, &st) || st.st_size < SUPER_SIZE)
+		return;
+	for (rec = (st.st_size - SUPER_SIZE) / v->rec_size; rec-- > 0; ) {
+		if (full_pread(l->fd, &h, sizeof(h), rec_off(v, rec)))
+			return;
+		/* only a last part can lead to a checkpoint that is all there */
+		if (h.magic != CKPT_MAGIC || h.part + 1 != h.parts || h.part > rec)
+			continue;
+		if (ckpt_read(v, l, rec - h.part, h.parts)) {
+			l->nrec = l->ckpt_nrec = rec + 1;
+			l->ckpt_parts = h.parts;
+			l->epoch = h.epoch;
+			return;
+		}
+	}
+}
+
+/*
+ * Checkpoint @l if enough has piled up to replay, and enough to make the
+ * checkpoint a small addition: the log never shrinks, so every checkpoint
+ * stays in it for good. Best effort; replay covers for a missing one.
+ */
+static void ckpt_save(struct vbd *v, struct log *l)
+{
+	uint64_t behind;
+
+	pthread_mutex_lock(&l->append_lock);
+	behind = l->nrec - l->ckpt_nrec;
+	if (behind * v->rec_size >= CKPT_BYTES && behind >= 4 * (uint64_t)l->ckpt_parts)
+		ckpt_write(v, l);
+	pthread_mutex_unlock(&l->append_lock);
 }
 
 /* Read @len bytes of record @rec starting @within bytes into its data. */
@@ -360,9 +550,12 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 	v->rec_size = HDR_SIZE + sb.chunk_size;
 	if ((err = open_base(v, &sb)))
 		goto fail;
+	/* a checkpoint is the newest map; a snapshot view filters, so it replays it all */
+	if (writable(v))
+		ckpt_load(v, &v->data);
 	if ((err = log_replay(v, &v->data)))
 		goto fail;
-	if (v->at != LIVE && v->at >= v->data.epoch) {
+	if (!writable(v) && v->at >= v->data.epoch) {
 		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
 		goto fail;
 	}
@@ -385,6 +578,7 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 		if ((err = log_replay(v, &v->cache)))
 			goto fail;
 	}
+	v->ready = true;
 	return v;
 fail:
 	vbd_close(v);
@@ -401,6 +595,8 @@ void vbd_close(struct vbd *v)
 {
 	if (!v)
 		return;
+	if (v->ready && writable(v))
+		ckpt_save(v, &v->data);
 	log_close(&v->data);
 	log_close(&v->cache);
 	if (v->base)
@@ -519,7 +715,7 @@ ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off)
 	size_t done = 0;
 	int ret = 0;
 
-	if (v->at != LIVE)
+	if (!writable(v))
 		return -EROFS;
 	if (off >= v->size)
 		return -ENOSPC;
@@ -555,6 +751,8 @@ ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off)
 
 int vbd_flush(struct vbd *v)
 {
+	if (writable(v))
+		ckpt_save(v, &v->data);
 	/* the cache can always be refetched; only the data log needs to last */
 	return fdatasync(v->data.fd) ? -errno : 0;
 }
@@ -567,7 +765,7 @@ int vbd_snapshot(struct vbd *v)
 	uint8_t *zero;
 	int ret;
 
-	if (v->at != LIVE)
+	if (!writable(v))
 		return -EROFS;
 	zero = calloc(1, v->chunk_size);
 	if (!zero)

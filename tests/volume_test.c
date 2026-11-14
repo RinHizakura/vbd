@@ -395,6 +395,78 @@ static void test_open_at(void)
 	teardown(v);
 }
 
+/*
+ * After enough records the map is appended to the log as a checkpoint and
+ * reopen starts from it. The proof: damage to a record it covers goes
+ * unnoticed, where a replay would have cut the log short at that record
+ * (test_bad_record). What was appended after the checkpoint is replayed on
+ * top of it, and a damaged checkpoint means a full replay.
+ */
+#define CKPT_BYTES	(64u << 20)	/* must match volume.c */
+#define REC		(64 + CHUNK)
+#define CKPT_NREC	((CKPT_BYTES + REC - 1) / REC)	/* records until one is due */
+#define BIG		(3u << 20)	/* 768 chunks: a map of three records */
+
+static void test_checkpoint(void)
+{
+	struct vbd *v = setup();
+	static uint8_t big_ref[BIG], big_buf[BIG];
+	struct stat st;
+
+	for (unsigned i = 0; i < CKPT_NREC; i++) {	/* over and over the 256 chunks */
+		uint64_t off = (i % (SIZE / CHUNK)) * CHUNK;
+
+		fill_random(buf, CHUNK);
+		assert(vbd_write(v, buf, CHUNK, off) == CHUNK);
+		memcpy(ref + off, buf, CHUNK);
+	}
+	v = reopen(v);				/* close appended it: 256 entries fit one record */
+	assert(stat(log_path, &st) == 0);
+	assert(st.st_size == SUPER_SIZE + (CKPT_NREC + 1) * REC);
+
+	fill_random(buf, CHUNK);		/* one more record, after the checkpoint */
+	assert(vbd_write(v, buf, CHUNK, 0) == CHUNK);
+	memcpy(ref, buf, CHUNK);
+	vbd_close(v);				/* too little new for another checkpoint */
+	assert(stat(log_path, &st) == 0);
+	assert(st.st_size == SUPER_SIZE + (CKPT_NREC + 2) * REC);
+
+	flip_log_bit(SUPER_SIZE + 64 + 1);	/* record 0: covered, long superseded */
+	v = vbd_open(log_path);
+	assert(v);
+	check_all(v);				/* the map from the checkpoint, the last record by replay */
+	vbd_close(v);
+
+	flip_log_bit(SUPER_SIZE + 64 + 1);	/* heal record 0, break the checkpoint */
+	flip_log_bit(SUPER_SIZE + CKPT_NREC * REC + 64 + 1);
+	v = vbd_open(log_path);
+	assert(v);
+	check_all(v);				/* by replay from record 0 */
+	teardown(v);
+
+	/* a map too big for one record is cut into parts: 768 entries, 256 in each */
+	snprintf(log_path, sizeof(log_path), "/tmp/vbd-base-big.log");
+	assert(vbd_create(log_path, BIG, CHUNK, NULL) == 0);
+	v = vbd_open(log_path);
+	assert(v);
+	memset(big_ref, 0, BIG);
+	for (unsigned i = 0; i < CKPT_NREC; i++) {
+		uint64_t off = (i % (BIG / CHUNK)) * CHUNK;
+
+		fill_random(buf, CHUNK);
+		assert(vbd_write(v, buf, CHUNK, off) == CHUNK);
+		memcpy(big_ref + off, buf, CHUNK);
+	}
+	vbd_close(v);
+	assert(stat(log_path, &st) == 0);
+	assert(st.st_size == SUPER_SIZE + (CKPT_NREC + 3) * REC);
+	flip_log_bit(SUPER_SIZE + 64 + 1);	/* record 0 again */
+	v = vbd_open(log_path);
+	assert(v && vbd_read(v, big_buf, BIG, 0) == BIG && memcmp(big_buf, big_ref, BIG) == 0);
+	vbd_close(v);
+	unlink(log_path);
+}
+
 #define RUN(t)	do { t(); puts("  " #t); } while (0)
 
 int main(void)
@@ -415,6 +487,7 @@ int main(void)
 	RUN(test_concurrent_fetch);
 	RUN(test_snapshot);
 	RUN(test_open_at);
+	RUN(test_checkpoint);
 
 	rcu_barrier();
 	rcu_unregister_thread();
