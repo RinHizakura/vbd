@@ -68,7 +68,7 @@ static int put_part(struct log *l, struct ckpt_hdr *h, uint64_t *ent)
 
 /*
  * Append the map of @l to its own file; with @snap, as a snapshot, which
- * also steps the epoch. The caller holds l->append_lock, which keeps the
+ * also steps the epoch. The caller holds the log (log.c), which keeps the
  * map still, the parts together and the step tied to them.
  */
 static int ckpt_write(struct log *l, bool snap)
@@ -206,22 +206,14 @@ bool ckpt_load(struct log *l)
  */
 void ckpt_save(struct log *l)
 {
-	uint64_t behind;
+	uint64_t behind = l->nrec - l->ckpt_nrec;
 
-	pthread_mutex_lock(&l->append_lock);
-	behind = l->nrec - l->ckpt_nrec;
 	if (behind * (HDR_SIZE + l->chunk_size) >= CKPT_BYTES &&
 	    behind >= 4 * (uint64_t)l->ckpt_parts)
 		ckpt_write(l, false);
-	pthread_mutex_unlock(&l->append_lock);
 }
 
 int ckpt_snapshot(struct log *l)
 {
-	int ret;
-
-	pthread_mutex_lock(&l->append_lock);
-	ret = ckpt_write(l, true);
-	pthread_mutex_unlock(&l->append_lock);
-	return ret;
+	return ckpt_write(l, true);
 }

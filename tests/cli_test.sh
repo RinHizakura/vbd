@@ -57,6 +57,18 @@ expect 1 "$VBD" read t.log 0 1M 2                     # no such snapshot
 hello vbd
 EOT
 
+# two processes read views of one volume at the same time and share its
+# cache: both get the base, and the cache ends up holding each chunk once
+head -c 4M /dev/urandom > big.img
+"$VBD" create big.log 4M 4K big.img
+"$VBD" snapshot big.log > /dev/null
+"$VBD" read big.log 0 4M 0 > one.img & "$VBD" read big.log 0 4M 0 > two.img
+wait
+cmp -s one.img big.img && cmp -s two.img big.img || fail "two readers through one cache"
+[ "$("$VBD" info big.log | sed -n 4p)" = "fetched 1024" ] || fail "fetched after two readers"
+[ "$(stat -c %s big.log.cache)" -eq $((4096 + 1024 * (64 + 4096))) ] ||
+	fail "the shared cache holds a chunk more than once"
+
 # errors
 expect 1 "$VBD" create t.log 2M 4K                   # exists
 expect 1 "$VBD" create u.log 2M 4K missing.img       # no such base

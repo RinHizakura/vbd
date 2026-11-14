@@ -105,6 +105,8 @@ struct cache *cache_open(const char *log_path, const void *super,
 		err = -EINVAL;	/* not this volume's cache */
 		goto fail;
 	}
+	/* a writer and its views, in whatever processes, fetch into the one file */
+	log_share(&c->log);
 	err = log_load(&c->log, chunk_size, nchunks, ALL_EPOCHS);
 fail:
 	free(path);
@@ -138,16 +140,17 @@ int cache_err(const struct cache *c)		{ return c->err; }
  * @within, into @buf. Only one thread fetches a given chunk: it enters the
  * chunk in c->fetching first, and later arrivals wait for it to leave, then
  * find the chunk in the log (and read it) or not (and fetch).
+ *
+ * Another process may have fetched the chunk since this one last looked at
+ * the log, so it looks again before going to the base. Two processes that
+ * miss at the same moment both fetch; the log keeps the first to arrive.
  */
 static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 		 uint32_t within, uint32_t len)
 {
-	uint8_t *tmp;
+	uint8_t *tmp = NULL;
 	void *e;
 	int ret = 0;
-
-	if (!c->base)
-		return c->err;	/* offline: nothing to fetch from */
 
 	pthread_mutex_lock(&c->fetch_lock);
 	while (xa_load(&c->fetching, chunk))
@@ -161,12 +164,20 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	if (ret)
 		return ret;
 
-	tmp = malloc(c->chunk_size);
-	ret = tmp ? c->ops->read(c->base, chunk * c->chunk_size, tmp, c->chunk_size)
-		  : -ENOMEM;
+	ret = log_refresh(&c->log);
 	if (!ret)
+		e = xa_load(&c->log.map, chunk);
+	if (ret || e)
+		;			/* failed, or someone else fetched it meanwhile */
+	else if (!c->base)
+		ret = c->err;		/* offline: nothing to fetch from */
+	else if (!(tmp = malloc(c->chunk_size)))
+		ret = -ENOMEM;
+	else
+		ret = c->ops->read(c->base, chunk * c->chunk_size, tmp, c->chunk_size);
+	if (!ret && tmp)
 		ret = log_append(&c->log, chunk, tmp);
-	if (!ret)
+	if (!ret && tmp)
 		memcpy(buf, tmp + within, len);
 	free(tmp);
 
@@ -174,6 +185,8 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	xa_erase(&c->fetching, chunk);	/* in the log now, or the next reader tries */
 	pthread_cond_broadcast(&c->fetch_done);
 	pthread_mutex_unlock(&c->fetch_lock);
+	if (!ret && e)
+		ret = log_read(&c->log, xa_to_value(e), buf, within, len);
 	return ret;
 }
 

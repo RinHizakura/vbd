@@ -13,6 +13,10 @@
  *
  * Any number of threads may read at once; a chunk that several miss on
  * together is fetched once.
+ *
+ * The cache file may be open in several processes at once, a volume's
+ * writer and views of it: each stores what it fetches and finds what the
+ * others stored, and the file holds every chunk once.
  */
 #ifndef VBD_CACHE_H
 #define VBD_CACHE_H

@@ -77,10 +77,45 @@ static bool takes_checkpoints(const struct log *l)
 	return l->loaded && l->upto == ALL_EPOCHS;
 }
 
+static int log_replay(struct log *l);
+
+/*
+ * Hold the log still, to add to it or to save its map: our own threads
+ * keep out by the mutex. A shared log also has other processes appending;
+ * the file lock keeps them out, and the map is then brought up to date
+ * with what they added. Always paired with log_release, whatever it returns.
+ */
+static int log_hold(struct log *l)
+{
+	pthread_mutex_lock(&l->append_lock);
+	if (!l->shared)
+		return 0;
+	while (flock(l->fd, LOCK_EX))
+		if (errno != EINTR)
+			return -errno;
+	return log_replay(l);
+}
+
+static void log_release(struct log *l)
+{
+	if (l->shared)
+		flock(l->fd, LOCK_UN);
+	pthread_mutex_unlock(&l->append_lock);
+}
+
+/* Append a checkpoint if one is due. Best effort. */
+static void log_checkpoint(struct log *l)
+{
+	if (!takes_checkpoints(l))
+		return;
+	if (!log_hold(l))
+		ckpt_save(l);
+	log_release(l);
+}
+
 void log_close(struct log *l)
 {
-	if (takes_checkpoints(l))
-		ckpt_save(l);
+	log_checkpoint(l);
 	xa_destroy(&l->map);
 	if (l->fd >= 0)
 		close(l->fd);
@@ -96,8 +131,9 @@ int log_open(struct log *l, const char *path, void *super)
 }
 
 /*
- * Bring the map up to date with the file, from record l->nrec on: 0, or
- * just past the checkpoint the map was taken from.
+ * Bring the map up to date with the file, from record l->nrec on: 0, just
+ * past the checkpoint the map was taken from, or where a shared log ended
+ * when we last looked.
  */
 static int log_replay(struct log *l)
 {
@@ -122,8 +158,10 @@ static int log_replay(struct log *l)
 		 * passed over unread: damage to one must not cost the records
 		 * that follow it.
 		 */
-		if (h.magic == CKPT_MAGIC)
+		if (h.magic == CKPT_MAGIC) {
+			l->ckpt_nrec = l->nrec + 1;	/* someone's checkpoint ends here */
 			continue;
+		}
 		if ((ret = full_pread(l->fd, data, l->chunk_size, off + HDR_SIZE)))
 			goto out;
 		if (h.magic != VBD_MAGIC ||
@@ -157,22 +195,43 @@ int log_lock(struct log *l)
 	return errno == EWOULDBLOCK ? -EBUSY : -errno;
 }
 
+void log_share(struct log *l)
+{
+	l->shared = true;
+}
+
+int log_refresh(struct log *l)
+{
+	int ret = log_hold(l);
+
+	log_release(l);
+	return ret;
+}
+
 int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto)
 {
+	bool shared = l->shared;
 	int ret;
 
 	l->chunk_size = chunk_size;
 	l->nchunks = nchunks;
 	l->upto = upto;
+	/* held, but the catching up is the load itself: from a checkpoint if there is one */
+	l->shared = false;
+	if (shared)
+		while (flock(l->fd, LOCK_EX) && errno == EINTR)
+			;
 	ret = ckpt_load(l) ? 0 : log_replay(l);
+	if (shared)
+		flock(l->fd, LOCK_UN);
+	l->shared = shared;
 	l->loaded = !ret;
 	return ret;
 }
 
 int log_sync(struct log *l)
 {
-	if (takes_checkpoints(l))
-		ckpt_save(l);
+	log_checkpoint(l);
 	return fdatasync(l->fd) ? -errno : 0;
 }
 
@@ -193,9 +252,10 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 {
 	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk,
 			     .crc = crc32c(0, data, l->chunk_size) };
-	int ret;
+	int ret = log_hold(l);
 
-	pthread_mutex_lock(&l->append_lock);
+	if (ret || (l->shared && xa_load(&l->map, chunk)))
+		goto out;	/* failed, or another open of a shared log got it in first */
 	h.epoch = l->epoch;
 	ret = rec_write(l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
@@ -203,13 +263,19 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 		ret = log_map(l, chunk, l->nrec);
 	if (!ret)
 		l->nrec++;
-	pthread_mutex_unlock(&l->append_lock);
+out:
+	log_release(l);
 	return ret;
 }
 
 int log_snapshot(struct log *l)
 {
-	return ckpt_snapshot(l);
+	int ret = log_hold(l);
+
+	if (!ret)
+		ret = ckpt_snapshot(l);
+	log_release(l);
+	return ret;
 }
 
 int log_read(struct log *l, uint64_t rec, uint8_t *buf, uint32_t within, uint32_t len)

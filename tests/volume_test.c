@@ -496,6 +496,43 @@ static void test_one_writer(void)
 }
 
 /*
+ * A writer and a view of the same volume share its base cache, as two
+ * processes would: each stores what it fetches, finds what the other
+ * stored, and the file holds every chunk once.
+ */
+static void test_shared_cache(void)
+{
+	struct vbd *v = setup(), *view;
+	char cache_path[sizeof(log_path) + 8];
+	uint64_t nbase = SIZE / 2 / CHUNK;
+	struct stat st;
+
+	snprintf(cache_path, sizeof(cache_path), "%s.cache", log_path);
+	assert(vbd_snapshot(v) == 0);
+	view = vbd_open_at(log_path, 0);
+	assert(view);
+
+	assert(vbd_read(v, buf, 10 * CHUNK, 0) == 10 * CHUNK);		/* chunks 0..9 */
+	assert(memcmp(buf, ref, 10 * CHUNK) == 0);
+	assert(vbd_read(view, buf, 10 * CHUNK, 5 * CHUNK) == 10 * CHUNK);	/* 5..14 */
+	assert(memcmp(buf, ref + 5 * CHUNK, 10 * CHUNK) == 0);
+	assert(vbd_fetched(view) == 15);	/* found 0..9 there, added 10..14 */
+	assert(stat(cache_path, &st) == 0);
+	assert(st.st_size == SUPER_SIZE + 15 * (64 + CHUNK));
+
+	check_all(v);				/* its own, the view's, and the rest */
+	check_all(view);
+	assert(vbd_fetched(v) == nbase && vbd_fetched(view) == nbase);
+	assert(stat(cache_path, &st) == 0);
+	assert(st.st_size == SUPER_SIZE + nbase * (64 + CHUNK));
+
+	vbd_close(view);
+	v = reopen(v);
+	assert(vbd_fetched(v) == nbase);
+	teardown(v);
+}
+
+/*
  * A view leaves the file as it finds it: what looks like a torn tail may be
  * a record another process is still writing. That holds when the view is
  * loaded from its snapshot's checkpoint, when it has to replay because the
@@ -683,6 +720,7 @@ int main(void)
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
 	RUN(test_one_writer);
+	RUN(test_shared_cache);
 	RUN(test_view_keeps_tail);
 	RUN(test_checkpoint);
 	RUN(test_cache_checkpoint);

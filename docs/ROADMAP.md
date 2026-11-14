@@ -66,6 +66,11 @@ Done:
 - Offline open: a base that cannot be probed leaves the volume open with
   `vbd_base_err` set; cached chunks read, misses return that error. Only a
   base that answers and has changed is refused.
+- The cache file is shared between processes, a volume's writer and views
+  of it: an append takes a `flock`, reads in what the others appended and
+  drops its own record if the chunk is there by now, and a miss looks at
+  the file once more before going to the base. The file holds each chunk
+  once; two processes that miss at the same moment both download.
 - Concurrent misses on one chunk fetch it once: the first reader enters
   the chunk in a table of fetches in progress, the others wait on a
   condition variable until it has left and then find it in the cache.
