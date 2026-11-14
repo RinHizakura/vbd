@@ -475,6 +475,45 @@ static void test_open_at(void)
  * (test_bad_record). What was appended after the checkpoint is replayed on
  * top of it, and a damaged checkpoint means a full replay.
  */
+/*
+ * A view leaves the file as it finds it: what looks like a torn tail may be
+ * a record another process is still writing. That holds when the view is
+ * loaded from its snapshot's checkpoint, when it has to replay because the
+ * checkpoint is damaged, and when the snapshot asked for does not exist.
+ */
+static void test_view_keeps_tail(void)
+{
+	struct vbd *v = setup();
+	uint8_t a[CHUNK], b[CHUNK];
+	struct stat before, after;
+	int fd;
+
+	fill_random(a, CHUNK); fill_random(b, CHUNK);
+	assert(vbd_write(v, a, CHUNK, 0) == CHUNK);		/* rec 0 */
+	assert(vbd_snapshot(v) == 0);				/* rec 1: snapshot 0 */
+	assert(vbd_write(v, b, CHUNK, 0) == CHUNK);		/* rec 2 */
+	vbd_close(v);
+	fd = open(log_path, O_WRONLY | O_APPEND);		/* half a record, in progress */
+	assert(fd >= 0 && write(fd, b, 100) == 100);
+	close(fd);
+	assert(stat(log_path, &before) == 0);
+
+	v = vbd_open_at(log_path, 0);				/* from the checkpoint */
+	assert(v && vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, a, CHUNK) == 0);
+	vbd_close(v);
+	assert(vbd_open_at(log_path, 7) == NULL && errno == ENOENT);	/* replays to the end */
+	flip_log_bit(SUPER_SIZE + (64 + CHUNK) + 64 + 1);	/* snapshot 0's checkpoint */
+	v = vbd_open_at(log_path, 0);				/* by replay */
+	assert(v && vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, a, CHUNK) == 0);
+	vbd_close(v);
+	assert(stat(log_path, &after) == 0 && after.st_size == before.st_size);
+
+	v = vbd_open(log_path);					/* the writer does clean up */
+	assert(v && vbd_read(v, buf, CHUNK, 0) == CHUNK && memcmp(buf, b, CHUNK) == 0);
+	assert(stat(log_path, &after) == 0 && after.st_size == before.st_size - 100);
+	teardown(v);
+}
+
 #define CKPT_BYTES	(64u << 20)	/* must match volume.c */
 #define REC		(64 + CHUNK)
 #define CKPT_NREC	((CKPT_BYTES + REC - 1) / REC)	/* records until one is due */
@@ -623,6 +662,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
+	RUN(test_view_keeps_tail);
 	RUN(test_checkpoint);
 	RUN(test_cache_checkpoint);
 

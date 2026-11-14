@@ -133,7 +133,4 @@ Remaining:
   checkpoint periodically or add shrinking
 - whether the mapping layer should move to a Rust XArray once one lands in
   the kernel
-- a snapshot view truncates a torn tail when it opens, like a writable
-  open does. With another process writing the same log at that moment, the
-  view can cut off a record that is only half written yet; and nothing
-  stops two processes from opening one volume for writing
+- nothing stops two processes from opening one volume for writing

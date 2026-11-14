@@ -81,7 +81,9 @@ int log_open(struct log *l, const char *path, void *super);
  * does not verify marks a torn tail, and the file is truncated there.
  *
  * With @upto below ALL_EPOCHS the result is a view: records with a larger
- * epoch are left out of the map, and the log must not be appended to.
+ * epoch are left out of the map, and the log must not be appended to. A
+ * view never changes the file, torn tail included, so it can be loaded
+ * while someone else is appending.
  */
 int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto);
 

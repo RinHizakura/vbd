@@ -136,8 +136,13 @@ static int log_replay(struct log *l)
 		if ((ret = log_map(l, h.chunk, l->nrec)))
 			goto out;
 	}
-	/* drop anything after the last good record so appends start clean */
-	if ((uint64_t)st.st_size != rec_off(l, l->nrec) && ftruncate(l->fd, rec_off(l, l->nrec)))
+	/*
+	 * Drop anything after the last good record so appends start clean. A
+	 * view appends nothing, and what looks torn to it may be a record
+	 * someone else is in the middle of writing: it leaves the file alone.
+	 */
+	if (l->upto == ALL_EPOCHS && (uint64_t)st.st_size != rec_off(l, l->nrec) &&
+	    ftruncate(l->fd, rec_off(l, l->nrec)))
 		ret = -errno;
 out:
 	free(data);
