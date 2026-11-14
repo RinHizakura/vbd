@@ -105,6 +105,7 @@ static void test_create_errors(void)
 	assert(vbd_create(log_path, SIZE, CHUNK, base_path) == -EEXIST);
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 3000, NULL) == -EINVAL);
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 8, NULL) == -EINVAL);	/* under 16 */
+	assert(vbd_create("/tmp/vbd-bad.log", 0, CHUNK, NULL) == -EINVAL);	/* no chunks at all */
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE + 1, CHUNK, NULL) == -EINVAL);
 	assert(vbd_create("/tmp/vbd-bad.log", SIZE, CHUNK, "/nonexistent") == -ENOENT);
 	teardown(v);

@@ -11,7 +11,8 @@ CPPFLAGS = -Iinclude -I$(XARRAY)/include -I$(XARRAY)/shim -I$(XARRAY)/lib -D_LGP
 LDLIBS   = $(XARRAY_LIB) -lurcu -lcurl -lpthread
 
 LIB      = build/libvbd.a
-LIB_OBJS = build/volume.o build/cache.o build/log.o build/ckpt.o build/crc32c.o \
+LIB_OBJS = build/volume.o build/super.o build/cache.o build/log.o build/ckpt.o \
+	   build/crc32c.o \
 	   build/base/file.o build/base/http.o
 BIN      = build/vbd
 BIN_OBJS = build/main.o build/ublk/server.o

@@ -19,7 +19,7 @@ on the base side exists only when the volume was created with a base image.
  |  libvbd                                               include/vbd.h  |
  |  vbd_create  vbd_open  vbd_close  vbd_read  vbd_write  vbd_flush     |
  +----------------------------------------------------------------------+
- |  engine                       src/volume.c  cache.c  log.c  ckpt.c   |
+ |  engine              src/volume.c  super.c  cache.c  log.c  ckpt.c   |
  |                                                                      |
  |  always                         . . only if created with a base . .  |
  |  +---------------------------+  .                                 .  |

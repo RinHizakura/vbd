@@ -7,9 +7,10 @@
  * A read looks in the data log; what the volume never wrote comes from the
  * base cache.
  *
- * The super block in front of the log names the base image (a local path
- * or an http(s) URL) and remembers its size and a validator from the backend
- * (base/base.h), so a log is never paired with the wrong base by mistake.
+ * The super block in front of the log (super.h) names the base image (a
+ * local path or an http(s) URL) and remembers its size and a validator from
+ * the backend (base/base.h), so a log is never paired with the wrong base
+ * by mistake.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -18,26 +19,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "common.h"
 #include "vbd.h"
 #include "cache.h"
-#include "crc32c.h"
 #include "log.h"
+#include "super.h"
 #include "base/base.h"
-
-#define VBD_VERSION	1
-
-struct super {
-	uint32_t crc;		/* crc32c of everything after this field */
-	uint32_t magic;
-	uint32_t version;
-	uint32_t chunk_size;
-	uint64_t size;
-	uint64_t base_size;	/* size of the base at create */
-	char     base_tag[BASE_TAG_LEN];	/* base validator at create (base_ops.probe) */
-	char     base[SUPER_SIZE - 32 - BASE_TAG_LEN];	/* path or URL; empty: zeros */
-};
-_Static_assert(sizeof(struct super) == SUPER_SIZE, "super block");
 
 /* vbd.at value for a normal, writable open */
 #define LIVE		ALL_EPOCHS
@@ -56,31 +42,14 @@ static bool writable(const struct vbd *v)
 	return v->at == LIVE;
 }
 
-static uint32_t super_crc(const struct super *sb)
-{
-	return crc32c(0, &sb->magic, sizeof(*sb) - offsetof(struct super, magic));
-}
-
-/* Everything create enforces, re-checked on open so a damaged super is refused. */
-static bool super_valid(const struct super *sb)
-{
-	return sb->magic == VBD_MAGIC && sb->version == VBD_VERSION &&
-	       sb->crc == super_crc(sb) &&
-	       IS_POWER_OF_2(sb->chunk_size) && sb->chunk_size >= MIN_CHUNK_SIZE && sb->size &&
-	       IS_ALIGNED(sb->size, sb->chunk_size) &&
-	       !sb->base[sizeof(sb->base) - 1];
-}
-
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path)
 {
-	struct super sb = { .magic = VBD_MAGIC, .version = VBD_VERSION,
-			    .chunk_size = chunk_size, .size = size };
-	int ret;
+	struct super sb;
+	int ret = super_init(&sb, size, chunk_size);
 
-	if (!IS_POWER_OF_2(chunk_size) || chunk_size < MIN_CHUNK_SIZE ||
-	    !IS_ALIGNED(size, chunk_size))
-		return -EINVAL;
+	if (ret)
+		return ret;
 	if (base_path) {
 		ret = base_ops_for(base_path)->probe(base_path, sb.base, sizeof(sb.base),
 						     &sb.base_size, sb.base_tag,
@@ -88,7 +57,7 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 		if (ret)
 			return ret;
 	}
-	sb.crc = super_crc(&sb);
+	super_seal(&sb);
 	ret = log_create(log_path, &sb);
 	if (ret || !base_path)
 		return ret;
