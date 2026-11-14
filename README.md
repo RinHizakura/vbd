@@ -58,7 +58,17 @@ actually read get downloaded, and once read they stay available even when
 the server is not. The base must not change while volumes depend on it: a
 volume whose base was modified refuses to open.
 
-Sizes and offsets accept `K`, `M` and `G` suffixes.
+```
+usage: vbd <command> <log> ...
+  create   <log> <size> <chunk> [base]   new volume; sizes take K, M, G suffixes
+  info     <log> [snapshot]              print size, chunk size, epoch, chunks fetched, base state
+  read     <log> <off> <len> [snapshot]  copy a range to stdout, as of a snapshot if given
+  write    <log> <off>                   copy stdin to the volume and flush
+  snapshot <log>                         freeze the current content; prints the snapshot number
+  serve    <log> [snapshot]              expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
+```
+
+Sizes and offsets accept `K`, `M` and `G` suffixes. For example:
 
 ```sh
 vbd create disk.log 1G 64K base.img   # new volume, 1 GiB, 64 KiB chunks
