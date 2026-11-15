@@ -121,6 +121,11 @@ uint32_t vbd_chunk_size(const struct vbd *v)	{ return v->chunk_size; }
 uint64_t vbd_fetched(const struct vbd *v)	{ return cache_fetched(v->cache); }
 int vbd_base_err(const struct vbd *v)		{ return cache_err(v->cache); }
 
+int vbd_prefetch(struct vbd *v, uint32_t chunks)
+{
+	return cache_prefetch(v->cache, chunks);
+}
+
 /* Read @len bytes of chunk @chunk starting @within bytes into it. */
 static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		      uint32_t within, uint32_t len)

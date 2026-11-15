@@ -458,6 +458,15 @@ bool log_has(const struct log *l, uint64_t chunk)
 	return xa_load((struct xarray *)&l->map, chunk) != NULL;
 }
 
+uint64_t log_first(const struct log *l, uint64_t from, uint64_t end)
+{
+	unsigned long at = from;
+
+	if (from >= end)
+		return end;
+	return xa_find((struct xarray *)&l->map, &at, end - 1, XA_PRESENT) ? at : end;
+}
+
 int log_read(struct log *l, uint64_t chunk, uint8_t *buf, uint32_t within, uint32_t len)
 {
 	void *e = xa_load(&l->map, chunk);

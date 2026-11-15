@@ -157,6 +157,9 @@ int log_snapshot(struct log *l);
 /* Does the log hold @chunk? Once it does, it always will. */
 bool log_has(const struct log *l, uint64_t chunk);
 
+/* The first chunk the log holds in [@from, @end), or @end if it holds none of them. */
+uint64_t log_first(const struct log *l, uint64_t from, uint64_t end);
+
 /*
  * Read @len bytes of @chunk, as it was last appended, starting @within
  * bytes into it. -ENOENT if the log does not hold the chunk.

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <urcu.h>
 
 #include <vbd.h>
@@ -30,9 +31,11 @@ static const struct cmd cmds[];
 
 static int usage(void)
 {
-	fputs("usage: vbd <command> ...\n", stderr);
+	fputs("usage: vbd [-p <chunks>] <command> ...\n", stderr);
 	for (const struct cmd *c = cmds; c->name; c++)
 		fprintf(stderr, "  %-8s %-40s %s\n", c->name, c->args, c->help);
+	fprintf(stderr, "  %-49s %s\n", "-p <chunks>",
+		"when a base chunk has to be fetched, also fetch this many after it, in the background");
 	return 2;
 }
 
@@ -219,11 +222,18 @@ static const struct cmd cmds[] = {
 int main(int argc, char **argv)
 {
 	const struct cmd *c = cmds;
-	uint64_t n[MAX_ARGS] = { 0 };
+	uint64_t n[MAX_ARGS] = { 0 }, prefetch = 0;
 	const char *log;
 	struct vbd *v;
-	int nargs = argc - 3, ret;
+	int nargs, opt, ret;
 	bool at;
+
+	while ((opt = getopt(argc, argv, "+p:")) != -1)	/* "+": options come before the command */
+		if (opt != 'p' || parse_size(optarg, &prefetch) || prefetch > UINT32_MAX)
+			return usage();
+	argc -= optind - 1;
+	argv += optind - 1;	/* argv[1] is the command again */
+	nargs = argc - 3;
 
 	if (argc < 3)
 		return usage();
@@ -245,6 +255,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "vbd: %s: %s\n", log, strerror(errno));
 		return 1;
 	}
+	if (prefetch && (ret = vbd_prefetch(v, prefetch)))
+		fprintf(stderr, "vbd: prefetch: %s\n", strerror(-ret));	/* and carry on without */
 	ret = c->run(v, n, at);
 	vbd_close(v);
 	return ret;

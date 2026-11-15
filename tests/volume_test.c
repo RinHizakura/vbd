@@ -466,6 +466,40 @@ static void test_open_at(void)
  * (test_bad_record). What was appended after the checkpoint is replayed on
  * top of it, and a damaged checkpoint means a full replay.
  */
+/* Wait until @v has fetched @want chunks, give it a moment to overshoot, and check it did not. */
+static void expect_fetched(struct vbd *v, uint64_t want)
+{
+	for (int i = 0; i < 300 && vbd_fetched(v) < want; i++)
+		usleep(10000);
+	usleep(50000);
+	assert(vbd_fetched(v) == want);
+}
+
+/*
+ * With prefetching on, a miss brings in the chunks after it on its own: as
+ * many as asked for, fewer when the cache already holds one of them or the
+ * base ends, and none after a read the cache could serve.
+ */
+static void test_prefetch(void)
+{
+	struct vbd *v = setup();
+	uint64_t nbase = SIZE / 2 / CHUNK;
+
+	assert(vbd_prefetch(v, 4) == 0);
+	assert(vbd_read(v, buf, 1, 8 * CHUNK) == 1);		/* miss on chunk 8 */
+	expect_fetched(v, 5);					/* 8, and 9..12 behind it */
+	assert(vbd_read(v, buf, 4 * CHUNK, 9 * CHUNK) == 4 * CHUNK);	/* hits */
+	assert(memcmp(buf, ref + 9 * CHUNK, 4 * CHUNK) == 0);
+	expect_fetched(v, 5);					/* a hit starts nothing */
+
+	assert(vbd_read(v, buf, 1, 6 * CHUNK) == 1);		/* miss on 6: the hole is 7 alone */
+	expect_fetched(v, 7);
+	assert(vbd_read(v, buf, 1, (nbase - 2) * CHUNK) == 1);	/* two before the end of the base */
+	expect_fetched(v, 9);					/* that one and the last */
+	check_all(v);
+	teardown(v);
+}
+
 /* Write a manifest of the base to <base>.manifest, wrong for @bad_chunk (-1: for none). */
 static void write_manifest(char *path, size_t path_len, int bad_chunk)
 {
@@ -768,6 +802,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
+	RUN(test_prefetch);
 	RUN(test_manifest);
 	RUN(test_one_writer);
 	RUN(test_shared_cache);

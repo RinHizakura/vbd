@@ -50,6 +50,14 @@ void cache_close(struct cache *c);	/* NULL is fine */
 int cache_read(struct cache *c, uint64_t chunk, uint8_t *buf,
 	       uint32_t within, uint32_t len);
 
+/*
+ * From now on, when a read has to fetch a chunk, go on in the background
+ * and fetch up to @chunks of the ones that follow it, stopping short at one
+ * the cache already has. Off until called: it fetches what nobody has asked
+ * for yet. Does nothing without a reachable base. 0 or -errno.
+ */
+int cache_prefetch(struct cache *c, uint32_t chunks);
+
 /* Distinct base chunks fetched so far. */
 uint64_t cache_fetched(const struct cache *c);
 /* 0 when the base is reachable (or there is none), else the negative errno. */

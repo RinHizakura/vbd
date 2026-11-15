@@ -3,12 +3,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
 
+#include <urcu.h>
 #include <xarray.h>
 
 #include "common.h"
@@ -32,9 +34,17 @@ struct cache {
 	bool has_file;		/* log is open on the cache file */
 	pthread_mutex_t file_lock;	/* one thread of ours at the cache file at a time */
 	struct xarray fetching;	/* chunks being fetched from the base right now */
-	pthread_mutex_t fetch_lock;	/* guards fetching */
+	pthread_mutex_t fetch_lock;	/* guards fetching and the pf_ fields */
 	pthread_cond_t fetch_done;	/* a fetch finished, fetching may have changed */
+	uint32_t pf_window;	/* chunks to fetch ahead of a miss; 0: no prefetcher */
+	uint64_t pf_next;	/* where the prefetcher starts next, or PF_IDLE */
+	bool pf_stop;
+	pthread_t pf_thread;
+	pthread_cond_t pf_wake;	/* pf_next or pf_stop changed */
 };
+
+/* cache.pf_next when the prefetcher has nothing to do */
+#define PF_IDLE		UINT64_MAX
 
 /* What cache.fetching holds for a chunk; only its presence matters. */
 #define FETCHING	xa_mk_value(1)
@@ -152,6 +162,7 @@ struct cache *cache_open(const char *log_path, const struct super *sb)
 	pthread_mutex_init(&c->file_lock, NULL);
 	pthread_mutex_init(&c->fetch_lock, NULL);
 	pthread_cond_init(&c->fetch_done, NULL);
+	pthread_cond_init(&c->pf_wake, NULL);
 	if (!sb->base[0])
 		return c;
 
@@ -192,6 +203,13 @@ void cache_close(struct cache *c)
 {
 	if (!c)
 		return;
+	if (c->pf_window) {
+		pthread_mutex_lock(&c->fetch_lock);
+		c->pf_stop = true;
+		pthread_cond_signal(&c->pf_wake);
+		pthread_mutex_unlock(&c->fetch_lock);
+		pthread_join(c->pf_thread, NULL);
+	}
 	/*
 	 * Closing may append a checkpoint, so the file has to be ours and the
 	 * log up to date with it. If it cannot catch up it will not checkpoint.
@@ -208,6 +226,7 @@ void cache_close(struct cache *c)
 	free(c->manifest);
 	pthread_mutex_destroy(&c->fetch_lock);
 	pthread_cond_destroy(&c->fetch_done);
+	pthread_cond_destroy(&c->pf_wake);
 	free(c);
 }
 
@@ -294,6 +313,61 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	return ret;
 }
 
+/*
+ * A reader that had to fetch chunk n will likely want n + 1 next. The
+ * prefetcher fetches the hole that starts there: up to pf_window chunks,
+ * fewer if the cache already holds one of them or the base ends. A newer
+ * miss, somewhere else, takes over from a run still in progress.
+ */
+static void *prefetcher(void *arg)
+{
+	struct cache *c = arg;
+	uint64_t nbase = (c->base_size + c->chunk_size - 1) / c->chunk_size;
+	uint8_t byte;
+
+	rcu_register_thread();
+	pthread_mutex_lock(&c->fetch_lock);
+	while (!c->pf_stop) {
+		uint64_t at = c->pf_next, end = at + c->pf_window;
+
+		if (at == PF_IDLE) {
+			pthread_cond_wait(&c->pf_wake, &c->fetch_lock);
+			continue;
+		}
+		c->pf_next = PF_IDLE;
+		if (end > nbase)
+			end = nbase;
+		end = log_first(&c->log, at, end);
+		for (; at < end && !c->pf_stop && c->pf_next == PF_IDLE; at++) {
+			pthread_mutex_unlock(&c->fetch_lock);
+			fetch(c, at, &byte, 0, 1);	/* an error is the reader's to meet */
+			pthread_mutex_lock(&c->fetch_lock);
+		}
+	}
+	pthread_mutex_unlock(&c->fetch_lock);
+	rcu_unregister_thread();
+	return NULL;
+}
+
+int cache_prefetch(struct cache *c, uint32_t chunks)
+{
+	sigset_t all, old;
+	int ret;
+
+	if (!c->base || !chunks || c->pf_window)
+		return 0;
+	c->pf_next = PF_IDLE;
+	c->pf_window = chunks;
+	/* signals are for the application's threads, not this one */
+	sigfillset(&all);
+	pthread_sigmask(SIG_BLOCK, &all, &old);
+	ret = -pthread_create(&c->pf_thread, NULL, prefetcher, c);
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+	if (ret)
+		c->pf_window = 0;
+	return ret;
+}
+
 int cache_read(struct cache *c, uint64_t chunk, uint8_t *buf,
 	       uint32_t within, uint32_t len)
 {
@@ -303,5 +377,11 @@ int cache_read(struct cache *c, uint64_t chunk, uint8_t *buf,
 	}
 	if (log_has(&c->log, chunk))
 		return log_read(&c->log, chunk, buf, within, len);
+	if (c->pf_window) {
+		pthread_mutex_lock(&c->fetch_lock);
+		c->pf_next = chunk + 1;
+		pthread_cond_signal(&c->pf_wake);
+		pthread_mutex_unlock(&c->fetch_lock);
+	}
 	return fetch(c, chunk, buf, within, len);
 }

@@ -83,9 +83,15 @@ Done:
   the chunk in a table of fetches in progress, the others wait on a
   condition variable until it has left and then find it in the cache.
 
+- Prefetch (`vbd_prefetch`, `vbd -p <chunks>`): a thread in the base cache
+  that, after a read had to fetch chunk n, fetches the hole that starts at
+  n + 1: up to the given number of chunks, ending early at the first one
+  `xa_find` reports as already in the cache, or at the end of the base. A
+  newer miss elsewhere takes over. Off by default, since it downloads what
+  nobody asked for.
+
 Remaining:
 
-- background prefetcher uses `xa_find` to fill holes near recent reads
 - test: mount a raw image over HTTP, `fsck` it, confirm only a small
   fraction of the image was downloaded
 

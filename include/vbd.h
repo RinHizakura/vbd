@@ -73,6 +73,15 @@ int vbd_base_err(const struct vbd *v);
 ssize_t vbd_read(struct vbd *v, void *buf, size_t len, uint64_t off);
 ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off);
 
+/*
+ * Fetch ahead: from now on, when a read has to fetch a chunk from the base,
+ * up to @chunks of the chunks after it are fetched in the background as
+ * well, stopping at one that is already there. Off by default, since it
+ * downloads what has not been asked for. Does nothing without a reachable
+ * base. 0 or -errno.
+ */
+int vbd_prefetch(struct vbd *v, uint32_t chunks);
+
 /* Make every completed write durable. */
 int vbd_flush(struct vbd *v);
 

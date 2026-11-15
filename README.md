@@ -59,7 +59,7 @@ the server is not. The base must not change while volumes depend on it: a
 volume whose base was modified refuses to open.
 
 ```
-usage: vbd <command> ...
+usage: vbd [-p <chunks>] <command> ...
   create   <log> <size> <chunk> [base [manifest]]   new volume; sizes take K, M, G suffixes
   info     <log> [snapshot]                         print size, chunk size, epoch, chunks fetched, base state
   read     <log> <off> <len> [snapshot]             copy a range to stdout, as of a snapshot if given
@@ -67,6 +67,7 @@ usage: vbd <command> ...
   snapshot <log>                                    freeze the current content; prints the snapshot number
   serve    <log> [snapshot]                         expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
   manifest <image> <chunk>                          write the manifest of a base image to stdout, for create's [manifest]
+  -p <chunks>                                       when a base chunk has to be fetched, also fetch this many after it, in the background
 ```
 
 Sizes and offsets accept `K`, `M` and `G` suffixes. For example:
@@ -100,6 +101,11 @@ chunk that arrives from the base and does not match is refused, not cached:
 vbd manifest ubuntu.img 64K > ubuntu.manifest
 vbd create disk.log 1G 64K https://images.example/ubuntu.img ubuntu.manifest
 ```
+
+With `-p`, reading ahead: `vbd -p 8 serve disk.log` fetches the 8 chunks
+after every chunk it had to fetch, in the background, so that a reader going
+through the image in order waits for the network less often. It is off by
+default because it downloads chunks nobody has asked for yet.
 
 One process at a time can have a volume open for writing. While it is
 being served, `vbd info`, `vbd write`, `vbd snapshot` and a `vbd read`
