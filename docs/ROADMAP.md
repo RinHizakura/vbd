@@ -89,11 +89,10 @@ Done:
   `xa_find` reports as already in the cache, or at the end of the base. A
   newer miss elsewhere takes over. Off by default, since it downloads what
   nobody asked for.
-
-Remaining:
-
-- test: mount a raw image over HTTP, `fsck` it, confirm only a small
-  fraction of the image was downloaded
+- `tests/ublk_test.sh` puts a 256 MiB ext4 image behind busybox httpd,
+  creates a volume over it with a manifest, serves it, and runs
+  `fsck.ext4 -f`, mounts it and reads a file: 24 of its 4096 chunks are
+  fetched, 0.6% of the image. The test fails above a quarter.
 
 ## P3: branches and time travel
 

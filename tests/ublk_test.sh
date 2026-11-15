@@ -1,8 +1,9 @@
 #!/bin/sh
 # Serve a volume as a ublk block device and use it through the kernel: raw
-# reads and writes with dd, a read-only snapshot device, then an ext4
-# filesystem that survives a server restart. Needs sudo without a password
-# and the ublk_drv module; skipped otherwise.
+# reads and writes with dd, a read-only snapshot device, an ext4 filesystem
+# that survives a server restart, and an ext4 image fetched over HTTP of
+# which a check and a mount download only a small part. Needs sudo without
+# a password and the ublk_drv module; skipped otherwise.
 set -eu
 NAME="ublk test"
 . "$(dirname "$0")/lib.sh"
@@ -12,10 +13,11 @@ if ! sudo -n true 2>/dev/null || [ ! -e /dev/ublk-control ]; then
 	exit 0
 fi
 T=$(mktemp -d); cd "$T"
-pid=""; srv=""; mnt=""
+pid=""; srv=""; mnt=""; httpd=""
 cleanup() {
 	[ -z "$mnt" ] || sudo -n umount "$mnt" 2>/dev/null || true
 	[ -z "$srv" ] || { sudo -n kill -s TERM "$srv" 2>/dev/null; wait "$pid" 2>/dev/null; } || true
+	[ -z "$httpd" ] || kill "$httpd" 2>/dev/null || true
 	rm -rf "$T"
 }
 trap cleanup EXIT
@@ -77,6 +79,33 @@ if command -v mkfs.ext4 > /dev/null; then
 	[ "$(cat mnt/hello)" = hello ] || fail "file did not survive the restart"
 	sudo -n umount mnt; mnt=""
 	stop
+fi
+
+# the point of fetching lazily: an ext4 image that lives on an HTTP server
+# is checked and mounted, and a file read from it, while most of the image
+# stays where it is. With a manifest, so every chunk that arrives is verified.
+CHUNKS=4096		# 256 MiB in 64 KiB chunks
+if command -v mkfs.ext4 > /dev/null && command -v busybox > /dev/null &&
+   command -v curl > /dev/null; then
+	mkdir -p mnt www files
+	echo "over http" > files/hello
+	head -c 20M /dev/urandom > files/blob	# something in the image that is never read
+	truncate -s 256M www/fs.img
+	mkfs.ext4 -q -d files www/fs.img
+	port=$(free_port)
+	start_httpd "$T/www" "$port"
+	"$VBD" manifest www/fs.img 64K > fs.manifest
+	"$VBD" create h.log 256M 64K "http://127.0.0.1:$port/fs.img" fs.manifest
+	serve h.log
+	sudo -n fsck.ext4 -fn "$dev" > /dev/null 2>&1 || fail "fsck of the image over http"
+	sudo -n mount -o ro,noload "$dev" mnt; mnt="$T/mnt"
+	[ "$(cat mnt/hello)" = "over http" ] || fail "file from the image over http"
+	sudo -n umount mnt; mnt=""
+	stop
+	fetched=$("$VBD" info h.log | sed -n 's/^fetched //p')
+	[ "$fetched" -gt 0 ] && [ "$fetched" -lt $((CHUNKS / 4)) ] ||
+		fail "fsck and mount fetched $fetched of $CHUNKS chunks"
+	echo "  image over http: fsck, mount and a file read fetched $fetched of $CHUNKS chunks"
 fi
 
 echo "ublk test: ok"
