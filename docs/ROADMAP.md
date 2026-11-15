@@ -117,11 +117,20 @@ Done:
   `test_open_before` writes, snapshots, writes everything again, and gets
   the earlier content back byte for byte.
 
+- Fork: `vbd_fork(parent, snapshot, log)`, `vbd fork <log> <new log>
+  [snapshot]`. A fork is a log of its own whose super block names the
+  parent's log and the snapshot it continues from; it starts as that super
+  block alone, with an empty map and no base or cache. With no snapshot
+  given, the parent is snapshotted first. Only that snapshot is frozen:
+  the parent stays writable and the fork never sees what it writes later.
+- Lookup walks the chain: the fork's data log, then each ancestor as a
+  view at its fork point, then the base cache of the volume at the bottom,
+  which every volume of the chain fetches into, in whatever process.
+  `test_fork` covers the two going separate ways, a fork of a fork, and
+  the shared cache.
+
 Remaining:
 
-- `fork(parent, name)`: new directory, empty XArray, parent pointer; parent
-  is frozen at its current epoch
-- lookup walks the branch chain before falling back to the base cache
 - a timer that snapshots periodically
 
 ## P4: ublk front end
@@ -156,3 +165,7 @@ Remaining:
   checkpoint periodically or add shrinking
 - whether the mapping layer should move to a Rust XArray once one lands in
   the kernel
+- a fork finds its parent by the absolute path of the parent's log, and by
+  nothing else. Move or rename the parent and its forks no longer open;
+  put another volume of the same size and chunk size at that path and a
+  fork takes it for its parent

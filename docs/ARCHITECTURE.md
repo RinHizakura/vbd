@@ -64,7 +64,9 @@ that is called. Nothing calls upwards, and two files with no arrow between
 them do not know about each other.
 
 - `volume.c` holds one log, the data log, and one base cache. Those two
-  are all it knows of files.
+  are all it knows of files. A fork holds its parent, another volume opened
+  as a view, in place of the base cache: a chunk the fork never wrote is
+  read from the parent, which in turn asks its own parent or its cache.
 - `cache.c` holds a second log, the chunks fetched so far, and a base
   backend. A volume asks it for any chunk the data log does not have and
   gets the base's content, or zeros past the end of the base or when
@@ -169,15 +171,18 @@ One request, by tag:
 
 ```
  super block (4096 B, written once by create, never rewritten)
- +-----+-------+---------+------------+------+-----------+---------------+-----------+---------------+
- | crc | magic | version | chunk_size | size | base_size | manifest_hash | base_tag  | base path/URL |
- | u32 | u32   | u32     | u32        | u64  | u64       | u8[32]        | char[128] | char[3904]    |
- +-----+-------+---------+------------+------+-----------+---------------+-----------+---------------+
-   ^ crc covers everything after itself             base_tag: the backend's validator at
-                                                    create (file mtime, or ETag / Last-Modified)
-   base_size 0 and an empty base path/URL mean the volume has no base.
+ +-----+-------+---------+------------+------+-----------+-----------+---------------+-----------+----------+
+ | crc | magic | version | chunk_size | size | base_size | parent_at | manifest_hash | base_tag  | base     |
+ | u32 | u32   | u32     | u32        | u64  | u64       | u64       | u8[32]        | char[128] | char[..] |
+ +-----+-------+---------+------------+------+-----------+-----------+---------------+-----------+----------+
+   ^ crc covers everything after itself
+   base: the base image as a path or URL, 3896 bytes; empty: the volume has no base.
+   base_tag: the backend's validator at create (file mtime, or ETag / Last-Modified).
    manifest_hash: sha256 of the base's manifest, kept as disk.log.manifest:
    one sha256 per base chunk. All zero when the volume was created without one.
+   parent_at: 2^64 - 1 unless the volume is a fork. For a fork it is the
+   parent's snapshot the fork continues from, and base holds the path of the
+   parent's log instead; a fork has no base, tag or manifest of its own.
 
  record (64 B header + chunk_size B data)
  +-------+-------+-------+-------+----------+------------------------------------+

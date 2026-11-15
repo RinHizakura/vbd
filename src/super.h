@@ -2,7 +2,8 @@
 /*
  * The super block: what a volume is, written once in front of its log when
  * it is created and never changed. Its size and chunk size, and what it
- * falls back to where it was never written.
+ * falls back to where it was never written: a base image, the volume it
+ * was forked from, or nothing.
  */
 #ifndef VBD_SUPER_H
 #define VBD_SUPER_H
@@ -21,16 +22,22 @@ struct super {
 	uint32_t chunk_size;
 	uint64_t size;
 	uint64_t base_size;	/* size of the base at create */
+	uint64_t parent_at;	/* a fork: the parent's snapshot it continues from; else NO_PARENT */
 	uint8_t  manifest_hash[SHA256_LEN];	/* sha256 of the base's manifest; all zero: it has none */
 	char     base_tag[BASE_TAG_LEN];	/* base validator at create (base_ops.probe) */
-	char     base[SUPER_SIZE - 32 - SHA256_LEN - BASE_TAG_LEN];	/* path or URL; empty: zeros */
+	/*
+	 * The base image, as a path or URL, or for a fork the path of the
+	 * parent's log. Empty: neither. Use the functions below to tell.
+	 */
+	char     base[SUPER_SIZE - 40 - SHA256_LEN - BASE_TAG_LEN];
 };
+#define NO_PARENT	UINT64_MAX
 _Static_assert(sizeof(struct super) == SUPER_SIZE, "super block");
 
 /*
  * Start the super block of a new volume: @size bytes in chunks of
  * @chunk_size, no base. -EINVAL for a geometry a volume cannot have. The
- * caller fills in the base, if any, and then seals it.
+ * caller fills in the base or the parent, if any, and then seals it.
  */
 int super_init(struct super *sb, uint64_t size, uint32_t chunk_size);
 /*
@@ -45,6 +52,19 @@ int super_set_base(struct super *sb, const char *base);
  * reached. @sb must have a base.
  */
 int super_check_base(const struct super *sb);
+/* Does the volume have a base image? */
+bool super_has_base(const struct super *sb);
+
+/*
+ * Make the new volume a fork: it continues from the volume whose log is at
+ * @parent_log, as that was at @snapshot. Instead of super_set_base; a fork
+ * has no base of its own. The path is noted in absolute form, so the
+ * parent must stay where it is. 0 or -errno.
+ */
+int super_set_parent(struct super *sb, const char *parent_log, uint64_t snapshot);
+/* The log of the volume this one was forked from, or NULL if it is not a fork. */
+const char *super_parent(const struct super *sb);
+
 /*
  * A manifest of the base is the sha256 of each of its chunks, the last one
  * padded with zeros, SHA256_LEN bytes each. This is how long that is for

@@ -21,7 +21,17 @@ _Avoid_: block, page, sector
 **Base**:
 The immutable image a volume falls back to for chunks it was never written
 with. A volume without one falls back to zeros.
-_Avoid_: backing file, parent, golden image
+_Avoid_: backing file, golden image, parent (a parent is a volume)
+
+**Fork**:
+A volume created from another volume as of one of its snapshots: it starts
+with that content and is written independently afterwards.
+_Avoid_: branch, clone, copy
+
+**Parent**:
+The volume a fork was created from. A fork reads from it what it never
+wrote itself.
+_Avoid_: base (a base is an image, not a volume), origin
 
 **Manifest**:
 The checksum of every chunk of a base, made from a trusted copy of it and

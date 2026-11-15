@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * The volume: a data log (log.h) over a base cache (cache.h).
+ * The volume: a data log (log.h) over a base cache (cache.h), or for a
+ * fork, over the volume it was forked from.
  *
  * disk.log  every chunk the volume was written with
  *
  * A read looks in the data log; what the volume never wrote comes from the
- * base cache.
+ * base cache, or from the parent, which is itself such a volume.
  *
  * The super block in front of the log (super.h) says how big the volume is
  * and what its base is.
@@ -30,7 +31,9 @@ struct vbd {
 	uint32_t chunk_size;
 	uint64_t at;		/* LIVE, or the snapshot this read-only view shows */
 	struct log data;	/* what the volume was written with */
-	struct cache *cache;	/* what it holds where it was never written */
+	/* what it holds where it was never written comes from one of these two: */
+	struct vbd *parent;	/* a fork: the volume it was forked from, as of the fork */
+	struct cache *cache;	/* otherwise: the base cache */
 };
 
 /* Opened with vbd_open: the newest content, writable. Not a snapshot view. */
@@ -66,6 +69,35 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
  * Open the volume as of @snapshot, LIVE for as it is now and writable. With
  * @before, as of the newest snapshot taken by that time instead.
  */
+int vbd_fork(const char *parent_path, uint64_t snapshot, const char *log_path)
+{
+	struct super sb;
+	struct vbd *p;
+	int ret;
+
+	if (snapshot == VBD_HEAD) {	/* from the parent as it is now: freeze that first */
+		p = vbd_open(parent_path);
+		if (!p)
+			return -errno;
+		snapshot = vbd_epoch(p);
+		ret = vbd_snapshot(p);
+		vbd_close(p);
+		if (ret)
+			return ret;
+	}
+	p = vbd_open_at(parent_path, snapshot);	/* is there such a snapshot, and of what shape */
+	if (!p)
+		return -errno;
+	ret = super_init(&sb, p->size, p->chunk_size);
+	vbd_close(p);
+	if (!ret)
+		ret = super_set_parent(&sb, parent_path, snapshot);
+	if (ret)
+		return ret;
+	super_seal(&sb);
+	return log_create(log_path, &sb);
+}
+
 static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
 			       const int64_t *before)
 {
@@ -90,11 +122,24 @@ static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
 		goto fail;	/* someone else is writing it */
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
-	/* before the data log is touched: a base that changed refuses the open */
-	v->cache = cache_open(log_path, &sb);
-	if (!v->cache) {
-		err = -errno;
-		goto fail;
+	if (super_parent(&sb)) {
+		/* a view of the parent, which opens its own parent in turn */
+		v->parent = vbd_open_at(super_parent(&sb), sb.parent_at);
+		if (!v->parent) {
+			err = -errno;
+			goto fail;
+		}
+		if (v->parent->size != v->size || v->parent->chunk_size != v->chunk_size) {
+			err = -EINVAL;	/* not the volume this was forked from */
+			goto fail;
+		}
+	} else {
+		/* before the data log is touched: a base that changed refuses the open */
+		v->cache = cache_open(log_path, &sb);
+		if (!v->cache) {
+			err = -errno;
+			goto fail;
+		}
 	}
 	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, v->at)))
 		goto fail;
@@ -129,18 +174,29 @@ void vbd_close(struct vbd *v)
 	if (!v)
 		return;
 	log_close(&v->data);
+	vbd_close(v->parent);
 	cache_close(v->cache);
 	free(v);
 }
 
 uint64_t vbd_size(const struct vbd *v)		{ return v->size; }
 uint32_t vbd_chunk_size(const struct vbd *v)	{ return v->chunk_size; }
-uint64_t vbd_fetched(const struct vbd *v)	{ return cache_fetched(v->cache); }
-int vbd_base_err(const struct vbd *v)		{ return cache_err(v->cache); }
+uint64_t vbd_at(const struct vbd *v)		{ return v->at; }
+
+/* The base cache at the bottom of a chain of forks; the one all of them fetch into. */
+static struct cache *base_cache(const struct vbd *v)
+{
+	while (v->parent)
+		v = v->parent;
+	return v->cache;
+}
+
+uint64_t vbd_fetched(const struct vbd *v)	{ return cache_fetched(base_cache(v)); }
+int vbd_base_err(const struct vbd *v)		{ return cache_err(base_cache(v)); }
 
 int vbd_prefetch(struct vbd *v, uint32_t chunks)
 {
-	return cache_prefetch(v->cache, chunks);
+	return cache_prefetch(base_cache(v), chunks);
 }
 
 /* Read @len bytes of chunk @chunk starting @within bytes into it. */
@@ -149,6 +205,8 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 {
 	if (log_has(&v->data, chunk))
 		return log_read(&v->data, chunk, buf, within, len);
+	if (v->parent)		/* whatever the parent held when this was forked from it */
+		return read_chunk(v->parent, chunk, buf, within, len);
 	return cache_read(v->cache, chunk, buf, within, len);
 }
 

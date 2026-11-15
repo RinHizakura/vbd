@@ -10,6 +10,10 @@
  * differs from what create recorded. A base that cannot be reached at all
  * still opens, offline: cached chunks read normally, a cache miss fails
  * with the error that reaching the base gave.
+ * A volume can instead be a fork of another: it has no base of its own and
+ * reads what it never wrote from its parent, as the parent was at the
+ * snapshot it was forked from. Forks of forks form a chain that ends at a
+ * volume with a base (or none), whose cache serves all of them.
  * Every write appends a whole chunk to the log; the XArray maps chunk
  * index -> log record, so the newest record for a chunk always wins.
  * Each record is stamped with the volume's epoch, the number of snapshots
@@ -42,6 +46,20 @@ struct vbd;
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path, const char *manifest_path);
 
+/* For vbd_fork: from the parent as it is now. What vbd_at says of a writable volume. */
+#define VBD_HEAD	UINT64_MAX
+
+/*
+ * Create @log_path as a fork of the volume at @parent_path: a volume of
+ * the same size that starts out with the parent's content as of @snapshot
+ * and is written independently from then on. It costs one super block.
+ * With VBD_HEAD the parent is snapshotted first, for which it must not be
+ * open for writing elsewhere (-EBUSY). The parent stays usable and can go
+ * on being written; the fork never sees what it writes after the snapshot.
+ * The parent's log has to stay where it is.
+ */
+int vbd_fork(const char *parent_path, uint64_t snapshot, const char *log_path);
+
 /*
  * Open a log and its base, for reading and writing. One open at a time: a
  * second one, in any process, fails with EBUSY until the first is closed.
@@ -64,6 +82,8 @@ struct vbd *vbd_open_before(const char *log_path, int64_t when);
 void vbd_close(struct vbd *v);
 
 uint64_t vbd_size(const struct vbd *v);
+/* The snapshot a view shows; VBD_HEAD for a volume open for writing. */
+uint64_t vbd_at(const struct vbd *v);
 uint32_t vbd_chunk_size(const struct vbd *v);
 /* Base chunks fetched into the local cache so far (0 without a base). */
 uint64_t vbd_fetched(const struct vbd *v);

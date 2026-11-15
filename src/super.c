@@ -31,7 +31,34 @@ int super_init(struct super *sb, uint64_t size, uint32_t chunk_size)
 	sb->version = VBD_VERSION;
 	sb->chunk_size = chunk_size;
 	sb->size = size;
+	sb->parent_at = NO_PARENT;
 	return 0;
+}
+
+bool super_has_base(const struct super *sb)
+{
+	return sb->base[0] && sb->parent_at == NO_PARENT;
+}
+
+int super_set_parent(struct super *sb, const char *parent_log, uint64_t snapshot)
+{
+	char *abs = realpath(parent_log, NULL);
+	int ret = 0;
+
+	if (!abs)
+		return -errno;
+	if (strlen(abs) >= sizeof(sb->base))
+		ret = -ENAMETOOLONG;
+	else
+		strcpy(sb->base, abs);
+	free(abs);
+	sb->parent_at = snapshot;
+	return ret;
+}
+
+const char *super_parent(const struct super *sb)
+{
+	return sb->parent_at == NO_PARENT ? NULL : sb->base;
 }
 
 int super_set_base(struct super *sb, const char *base)
@@ -102,5 +129,6 @@ bool super_valid(const struct super *sb)
 	return sb->magic == VBD_MAGIC && sb->version == VBD_VERSION &&
 	       sb->crc == super_crc(sb) &&
 	       geometry_ok(sb->size, sb->chunk_size) &&
-	       !sb->base[sizeof(sb->base) - 1];
+	       !sb->base[sizeof(sb->base) - 1] &&
+	       (sb->parent_at == NO_PARENT || sb->base[0]);	/* a fork names its parent */
 }

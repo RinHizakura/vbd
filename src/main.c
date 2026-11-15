@@ -76,6 +76,33 @@ static int cmd_create(const char *log, char **args, int n)
 	return 0;
 }
 
+static int cmd_fork(const char *parent, char **args, int n)
+{
+	uint64_t at = VBD_HEAD, when;
+	struct vbd *v;
+	int ret;
+
+	if (n > 1 && args[1][0] == '@') {	/* by time: see which snapshot that is */
+		if (parse_size(args[1] + 1, &when) || when > INT64_MAX)
+			return usage();
+		v = vbd_open_before(parent, when);
+		if (!v) {
+			fprintf(stderr, "vbd fork: %s: %s\n", parent, strerror(errno));
+			return 1;
+		}
+		at = vbd_at(v);
+		vbd_close(v);
+	} else if (n > 1 && parse_size(args[1], &at)) {
+		return usage();
+	}
+	ret = vbd_fork(parent, at, args[0]);
+	if (ret) {
+		fprintf(stderr, "vbd fork: %s\n", strerror(-ret));
+		return 1;
+	}
+	return 0;
+}
+
 /*
  * The manifest of an image: one sha256 per chunk, a short last chunk padded
  * with zeros, which is how the engine reads it.
@@ -205,6 +232,8 @@ out:
 static const struct cmd cmds[] = {
 	{ "create", "<log> <size> <chunk> [base [manifest]]", "new volume; sizes take K, M, G suffixes",
 	  2, 4, .make = cmd_create },
+	{ "fork", "<log> <new log> [snapshot]", "new volume that continues from <log> as it is now, or was at a snapshot",
+	  1, 2, .make = cmd_fork },
 	{ "info", "<log> [snapshot]", "print size, chunk size, epoch, chunks fetched, base state",
 	  0, 1, .at = true, .run = cmd_info },
 	{ "read", "<log> <off> <len> [snapshot]", "copy a range to stdout, as of a snapshot if given",
@@ -245,6 +274,7 @@ int main(int argc, char **argv)
 	if (!c->name || nargs < c->min || nargs > c->max)
 		return usage();
 	log = argv[2];
+	rcu_register_thread();
 	if (c->make)
 		return c->make(log, argv + 3, nargs);
 	at = c->at && nargs == c->max;
@@ -256,7 +286,6 @@ int main(int argc, char **argv)
 	if (when_s && (parse_size(when_s, &when) || when > INT64_MAX))
 		return usage();
 
-	rcu_register_thread();
 	v = when_s ? vbd_open_before(log, when) :
 	    at ? vbd_open_at(log, n[nargs - 1]) : vbd_open(log);
 	if (!v) {

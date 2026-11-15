@@ -61,6 +61,7 @@ volume whose base was modified refuses to open.
 ```
 usage: vbd [-p <chunks>] <command> ...
   create   <log> <size> <chunk> [base [manifest]]   new volume; sizes take K, M, G suffixes
+  fork     <log> <new log> [snapshot]               new volume that continues from <log> as it is now, or was at a snapshot
   info     <log> [snapshot]                         print size, chunk size, epoch, chunks fetched, base state
   read     <log> <off> <len> [snapshot]             copy a range to stdout, as of a snapshot if given
   write    <log> <off>                              copy stdin to the volume and flush
@@ -82,6 +83,8 @@ printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 vbd snapshot disk.log                 # freeze the current content; prints the snapshot number
 vbd read disk.log 0 4K 0              # the same range as it was at snapshot 0
 vbd read disk.log 0 4K @$(date -d '10 minutes ago' +%s)   # ... as it was ten minutes ago
+vbd fork disk.log job1.log            # a new volume that continues from disk.log as it is now
+vbd fork disk.log job2.log 0          # ... or as it was at snapshot 0
 sudo vbd serve disk.log               # prints /dev/ublkbN; Ctrl-C removes it again
 sudo vbd serve disk.log 0             # a read-only device showing snapshot 0
 ```
@@ -94,6 +97,13 @@ at that moment, 16 bytes per chunk written so far, rounded up to whole
 chunks: one chunk of log space for a small volume. Reading as of a
 snapshot never changes the volume, and does not get slower with how much
 was written before it.
+
+A fork is a volume that starts out with another volume's content and is
+written independently from then on. It costs 4 KiB to create, whatever the
+size, and forks of one volume share its cache of the base image, so each
+chunk is downloaded once however many of them read it. The parent can go
+on being used; the fork does not see what is written to it afterwards.
+Leave the parent's log where it is: a fork finds it by its path.
 
 To be sure a base is what you expect, and stays that, give `create` a
 manifest of it: the sha256 of every chunk, made from a copy you trust. A

@@ -163,7 +163,7 @@ struct cache *cache_open(const char *log_path, const struct super *sb)
 	pthread_mutex_init(&c->fetch_lock, NULL);
 	pthread_cond_init(&c->fetch_done, NULL);
 	pthread_cond_init(&c->pf_wake, NULL);
-	if (!sb->base[0])
+	if (!super_has_base(sb))
 		return c;
 
 	if ((err = bind_base(c, sb)))

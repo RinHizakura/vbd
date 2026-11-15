@@ -55,6 +55,28 @@ expect 2 "$VBD" read t.log 0 1M @soon
 hello vbd
 EOT
 
+# a fork continues from the parent as of the fork; then the two diverge
+"$VBD" read t.log 0 2M > parent.img
+epoch=$("$VBD" info t.log | sed -n 's/^epoch //p')
+"$VBD" fork t.log f.log
+[ "$("$VBD" info t.log | sed -n 's/^epoch //p')" -eq $((epoch + 1)) ] || fail "fork snapshots the parent"
+[ "$(stat -c %s f.log)" -eq 4096 ] || fail "a fresh fork is a super block and nothing else"
+printf 'in the fork' | "$VBD" write f.log 100
+printf 'in the parent' | "$VBD" write t.log 200
+{ head -c 100 parent.img; printf 'in the fork'; tail -c +112 parent.img; } > fork.img
+"$VBD" read f.log 0 2M | cmp -s - fork.img || fail "fork content"
+{ head -c 200 parent.img; printf 'in the parent'; tail -c +214 parent.img; } > parent2.img
+"$VBD" read t.log 0 2M | cmp -s - parent2.img || fail "parent content after the fork wrote"
+"$VBD" fork t.log g.log 0				# from an existing snapshot
+"$VBD" read g.log 0 1M | cmp -s - expect.img || fail "fork of snapshot 0"
+"$VBD" fork t.log h.log "@$(date +%s)"			# ... or the newest one by a time
+"$VBD" read h.log 0 2M | cmp -s - parent.img || fail "fork as of now"
+"$VBD" fork f.log ff.log				# a fork of a fork
+"$VBD" read ff.log 0 2M | cmp -s - fork.img || fail "fork of a fork"
+expect 1 "$VBD" fork t.log x.log 99			# no such snapshot
+expect 1 "$VBD" fork t.log f.log			# exists
+expect 1 "$VBD" fork t.log x.log @1			# no snapshot that old
+
 # manifest: one sha256 per chunk; a volume created with them checks what it fetches
 "$VBD" manifest base.img 4K > base.manifest
 [ "$(stat -c %s base.manifest)" -eq $((256 * 32)) ] || fail "manifest size"

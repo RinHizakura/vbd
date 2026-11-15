@@ -619,6 +619,66 @@ static void test_shared_cache(void)
 }
 
 /*
+ * A fork starts out as its parent was at the fork and goes its own way
+ * from there, as does the parent. A fork of a fork reads down the chain,
+ * and all of them fetch into the one cache at the bottom.
+ */
+static void test_fork(void)
+{
+	struct vbd *v = setup(), *a, *b;
+	char a_path[sizeof(log_path) + 4], b_path[sizeof(log_path) + 4];
+	static uint8_t at_fork[SIZE], ref_a[SIZE];
+	uint64_t nbase = SIZE / 2 / CHUNK;
+	struct stat st;
+
+	snprintf(a_path, sizeof(a_path), "%s.a", log_path);
+	snprintf(b_path, sizeof(b_path), "%s.b", log_path);
+	fill_random(buf, 2 * CHUNK);
+	assert(vbd_write(v, buf, 2 * CHUNK, 0) == 2 * CHUNK);
+	memcpy(ref, buf, 2 * CHUNK);
+	memcpy(at_fork, ref, SIZE);
+
+	assert(vbd_fork(log_path, VBD_HEAD, a_path) == -EBUSY);	/* v would have to be snapshotted */
+	vbd_close(v);
+	assert(vbd_fork(log_path, VBD_HEAD, a_path) == 0);	/* takes snapshot 0 */
+	assert(stat(a_path, &st) == 0 && st.st_size == SUPER_SIZE);
+	assert(vbd_fork(log_path, 1, b_path) == -ENOENT);	/* no such snapshot */
+	assert(vbd_fork(log_path, 0, a_path) == -EEXIST);
+
+	v = vbd_open(log_path);					/* the parent moves on */
+	assert(v && vbd_epoch(v) == 1);
+	fill_random(buf, CHUNK);
+	assert(vbd_write(v, buf, CHUNK, CHUNK) == CHUNK);
+	memcpy(ref + CHUNK, buf, CHUNK);
+
+	a = vbd_open(a_path);					/* beside the parent's writer */
+	assert(a && vbd_size(a) == SIZE && vbd_chunk_size(a) == CHUNK);
+	assert(vbd_read(a, buf, SIZE, 0) == SIZE && memcmp(buf, at_fork, SIZE) == 0);
+	assert(vbd_fetched(a) == nbase - 2);			/* the parent had written two itself */
+	memcpy(ref_a, at_fork, SIZE);
+	fill_random(buf, 100);
+	assert(vbd_write(a, buf, 100, 3 * CHUNK + 7) == 100);	/* read-modify-write down the chain */
+	memcpy(ref_a + 3 * CHUNK + 7, buf, 100);
+	assert(vbd_read(a, buf, SIZE, 0) == SIZE && memcmp(buf, ref_a, SIZE) == 0);
+	check_all(v);						/* the parent saw none of it */
+	assert(vbd_fetched(v) == nbase - 2);			/* and found the fork's fetches in the cache */
+	assert(vbd_fork(log_path, 0, b_path) == 0);		/* an explicit snapshot needs no writer */
+	unlink(b_path);
+	vbd_close(a);
+
+	assert(vbd_fork(a_path, VBD_HEAD, b_path) == 0);	/* a fork of the fork */
+	a = vbd_open(a_path);
+	fill_random(buf, CHUNK);
+	assert(a && vbd_write(a, buf, CHUNK, 5 * CHUNK) == CHUNK);	/* after b was forked off */
+	b = vbd_open(b_path);
+	assert(b && vbd_read(b, buf, SIZE, 0) == SIZE && memcmp(buf, ref_a, SIZE) == 0);
+	assert(vbd_fetched(b) == nbase - 2);			/* nothing was fetched twice */
+	vbd_close(b);
+	vbd_close(a);
+	teardown(v);
+}
+
+/*
  * A snapshot remembers when it was taken, and a volume can be opened as it
  * was at a time: at the newest snapshot taken by then. The content is the
  * earlier one, byte for byte, although everything was written again since.
@@ -841,6 +901,7 @@ int main(void)
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
 	RUN(test_open_before);
+	RUN(test_fork);
 	RUN(test_prefetch);
 	RUN(test_manifest);
 	RUN(test_one_writer);
