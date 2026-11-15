@@ -61,30 +61,9 @@ What is built today, drawn as blocks.
  the http backend only.
 ```
 
-Everything below `include/vbd.h` is the engine. Everything above it is a
-consumer: the CLI, the tests and the ublk server. The engine has no
-knowledge of what sits above it; the server is a queue thread per CPU, each
-turning block requests into vbd_read and vbd_write calls.
-
-Inside the engine an arrow points from the file that calls to the file
-that is called. Nothing calls upwards, and two files with no arrow between
-them do not know about each other.
-
-- `volume.c` holds one log, the data log, and one base cache. Those two
-  are all it knows of files. A fork holds its parent, another volume opened
-  as a view, in place of the base cache: a chunk the fork never wrote is
-  read from the parent, which in turn asks its own parent or its cache.
-- `cache.c` holds a second log, the chunks fetched so far, and a base
-  backend. A volume asks it for any chunk the data log does not have and
-  gets the base's content, or zeros past the end of the base or when
-  there is no base. It is the only file that reads from a base, and only
-  through `struct base_ops`; the backend is picked from the name given to
-  `create`.
-- `super.c` is used from both sides: `volume.c` writes and validates the
-  super block, `cache.c` reads from it what the base is.
-- `log.c` is the same code for both files on disk. It does not know what a
-  volume, a base or a super block is: the 4 KiB in front of its records
-  are bytes it hands to whoever opened it.
+Everything below `include/vbd.h` is the engine; everything above it is a
+consumer. Inside the engine an arrow points from the file that calls to the
+file that is called, and nothing calls upwards.
 
 ## A volume in memory and on disk
 
