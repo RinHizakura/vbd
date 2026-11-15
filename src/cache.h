@@ -26,20 +26,20 @@
 #include <stdint.h>
 
 struct cache;
-
-/* Create the cache file for the volume at @log_path, behind a copy of its super block. */
-int cache_create(const char *log_path, const void *super);
+struct super;
 
 /*
- * Open the cache of the volume at @log_path. @base, @base_size and
- * @base_tag are what the volume's super block says about its base; an empty
- * @base means there is none, and then no file is involved. @super is that
- * super block, which the cache file must start with too.
+ * Create the cache file for the new volume at @log_path, whose sealed
+ * super block is @sb. Only for a volume with a base.
+ */
+int cache_create(const char *log_path, const struct super *sb);
+
+/*
+ * Open the cache of the volume at @log_path, whose super block is @sb.
+ * With no base in @sb, no file is involved.
  * Returns NULL and sets errno; ESTALE for a base that changed.
  */
-struct cache *cache_open(const char *log_path, const void *super,
-			 const char *base, uint64_t base_size, const char *base_tag,
-			 uint32_t chunk_size, uint64_t nchunks);
+struct cache *cache_open(const char *log_path, const struct super *sb);
 void cache_close(struct cache *c);	/* NULL is fine */
 
 /* Read @len bytes of @chunk starting @within bytes into it. 0 or -errno. */

@@ -31,6 +31,18 @@ _Static_assert(sizeof(struct super) == SUPER_SIZE, "super block");
  * caller fills in the base, if any, and then seals it.
  */
 int super_init(struct super *sb, uint64_t size, uint32_t chunk_size);
+/*
+ * Give the new volume the base image @base: look at it and note what will
+ * identify it later, its name in a form that stays valid, its size and the
+ * backend's validator. 0 or -errno; -ENOENT and the like if it is not there.
+ */
+int super_set_base(struct super *sb, const char *base);
+/*
+ * Look at the base again: 0 if it is still what super_set_base saw,
+ * -ESTALE if its size or validator changed, another -errno if it cannot be
+ * reached. @sb must have a base.
+ */
+int super_check_base(const struct super *sb);
 /* Checksum @sb; it must not change afterwards. */
 void super_seal(struct super *sb);
 /* Sealed, undamaged, and everything super_init insists on? */

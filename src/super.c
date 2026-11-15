@@ -33,6 +33,25 @@ int super_init(struct super *sb, uint64_t size, uint32_t chunk_size)
 	return 0;
 }
 
+int super_set_base(struct super *sb, const char *base)
+{
+	return base_ops_for(base)->probe(base, sb->base, sizeof(sb->base),
+					 &sb->base_size, sb->base_tag,
+					 sizeof(sb->base_tag));
+}
+
+int super_check_base(const struct super *sb)
+{
+	char tag[BASE_TAG_LEN], stored[sizeof(sb->base)];
+	uint64_t size;
+	int ret = base_ops_for(sb->base)->probe(sb->base, stored, sizeof(stored),
+						&size, tag, sizeof(tag));
+
+	if (ret)
+		return ret;
+	return size == sb->base_size && !strcmp(tag, sb->base_tag) ? 0 : -ESTALE;
+}
+
 void super_seal(struct super *sb)
 {
 	sb->crc = super_crc(sb);

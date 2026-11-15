@@ -11,6 +11,7 @@
 
 #include "cache.h"
 #include "log.h"
+#include "super.h"
 #include "base/base.h"
 
 #define CACHE_SUFFIX	".cache"
@@ -64,10 +65,10 @@ static void release(struct cache *c)
 	pthread_mutex_unlock(&c->file_lock);
 }
 
-int cache_create(const char *log_path, const void *super)
+int cache_create(const char *log_path, const struct super *sb)
 {
 	char *path = cache_path(log_path);
-	int ret = path ? log_create(path, super) : -ENOMEM;
+	int ret = path ? log_create(path, sb) : -ENOMEM;
 
 	free(path);
 	return ret;
@@ -78,53 +79,46 @@ int cache_create(const char *log_path, const void *super)
  * fetched chunks still read, a miss returns the error seen here. One that
  * changed is refused with -ESTALE, since what was fetched may then be wrong.
  */
-static int bind_base(struct cache *c, const char *base, uint64_t base_size,
-		     const char *base_tag)
+static int bind_base(struct cache *c, const struct super *sb)
 {
-	/* the name came out of a super block, so its stored form fits in one */
-	char tag[BASE_TAG_LEN], stored[SUPER_SIZE];
-	uint64_t size;
-	int ret;
+	int ret = super_check_base(sb);
 
-	c->ops = base_ops_for(base);
-	c->base_size = base_size;
-	ret = c->ops->probe(base, stored, sizeof(stored), &size, tag, sizeof(tag));
+	c->ops = base_ops_for(sb->base);
+	c->base_size = sb->base_size;
+	if (ret == -ESTALE)
+		return ret;
 	if (ret) {
 		c->err = ret;
 		return 0;
 	}
-	if (size != base_size || strcmp(tag, base_tag))
-		return -ESTALE;
-	c->base = c->ops->open(base);
+	c->base = c->ops->open(sb->base);
 	if (!c->base)
 		c->err = -errno;
 	return 0;
 }
 
-struct cache *cache_open(const char *log_path, const void *super,
-			 const char *base, uint64_t base_size, const char *base_tag,
-			 uint32_t chunk_size, uint64_t nchunks)
+struct cache *cache_open(const char *log_path, const struct super *sb)
 {
 	struct cache *c = calloc(1, sizeof(*c));
-	uint8_t *mine = NULL;
+	struct super *mine = NULL;
 	char *path = NULL;
 	int err = 0;
 
 	if (!c)
 		return NULL;
-	c->chunk_size = chunk_size;
+	c->chunk_size = sb->chunk_size;
 	log_init(&c->log);
 	xa_init(&c->fetching);
 	pthread_mutex_init(&c->file_lock, NULL);
 	pthread_mutex_init(&c->fetch_lock, NULL);
 	pthread_cond_init(&c->fetch_done, NULL);
-	if (!base[0])
+	if (!sb->base[0])
 		return c;
 
-	if ((err = bind_base(c, base, base_size, base_tag)))
+	if ((err = bind_base(c, sb)))
 		goto fail;
 	path = cache_path(log_path);
-	mine = malloc(SUPER_SIZE);
+	mine = malloc(sizeof(*mine));
 	if (!path || !mine) {
 		err = -ENOMEM;
 		goto fail;
@@ -132,14 +126,14 @@ struct cache *cache_open(const char *log_path, const void *super,
 	if ((err = log_open(&c->log, path, mine)))
 		goto fail;
 	c->has_file = true;
-	if (memcmp(mine, super, SUPER_SIZE)) {
+	if (memcmp(mine, sb, sizeof(*sb))) {
 		err = -EINVAL;	/* not this volume's cache */
 		goto fail;
 	}
 	/* as acquire, except that loading is the catching up */
 	while (flock(log_fd(&c->log), LOCK_EX) && errno == EINTR)
 		;
-	err = log_load(&c->log, chunk_size, nchunks, ALL_EPOCHS);
+	err = log_load(&c->log, sb->chunk_size, sb->size / sb->chunk_size, ALL_EPOCHS);
 	flock(log_fd(&c->log), LOCK_UN);
 fail:
 	free(path);

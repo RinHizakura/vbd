@@ -7,10 +7,8 @@
  * A read looks in the data log; what the volume never wrote comes from the
  * base cache.
  *
- * The super block in front of the log (super.h) names the base image (a
- * local path or an http(s) URL) and remembers its size and a validator from
- * the backend (base/base.h), so a log is never paired with the wrong base
- * by mistake.
+ * The super block in front of the log (super.h) says how big the volume is
+ * and what its base is.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -23,7 +21,6 @@
 #include "cache.h"
 #include "log.h"
 #include "super.h"
-#include "base/base.h"
 
 /* vbd.at value for a normal, writable open */
 #define LIVE		ALL_EPOCHS
@@ -50,13 +47,8 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 
 	if (ret)
 		return ret;
-	if (base_path) {
-		ret = base_ops_for(base_path)->probe(base_path, sb.base, sizeof(sb.base),
-						     &sb.base_size, sb.base_tag,
-						     sizeof(sb.base_tag));
-		if (ret)
-			return ret;
-	}
+	if (base_path && (ret = super_set_base(&sb, base_path)))
+		return ret;
 	super_seal(&sb);
 	ret = log_create(log_path, &sb);
 	if (ret || !base_path)
@@ -71,7 +63,6 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
 	struct super sb;
-	uint64_t nchunks;
 	int err;
 
 	if (!v)
@@ -89,15 +80,13 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 		goto fail;	/* someone else is writing it */
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
-	nchunks = sb.size / sb.chunk_size;
 	/* before the data log is touched: a base that changed refuses the open */
-	v->cache = cache_open(log_path, &sb, sb.base, sb.base_size, sb.base_tag,
-			      sb.chunk_size, nchunks);
+	v->cache = cache_open(log_path, &sb);
 	if (!v->cache) {
 		err = -errno;
 		goto fail;
 	}
-	if ((err = log_load(&v->data, sb.chunk_size, nchunks, v->at)))
+	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, v->at)))
 		goto fail;
 	if (!writable(v) && v->at >= log_epoch(&v->data)) {
 		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
