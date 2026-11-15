@@ -129,10 +129,6 @@ Done:
   `test_fork` covers the two going separate ways, a fork of a fork, and
   the shared cache.
 
-Remaining:
-
-- a timer that snapshots periodically
-
 ## P4: ublk front end
 
 Done:
