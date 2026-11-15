@@ -161,7 +161,6 @@ Done:
 
 Remaining:
 
-- `UBLK_F_USER_RECOVERY`: survive a server restart without unmounting
 - `fio` against a loop device over the same image; boot a VM from the device
 
 ## Open questions
