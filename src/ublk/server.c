@@ -6,18 +6,21 @@
  * buffer it shares with us by mmap, one array per queue, and signals each
  * one as the completion of an io_uring URING_CMD on /dev/ublkcN. There is
  * a queue per CPU, and each is one thread here with its own ring: it
- * answers with vbd_read or vbd_write on a per-tag bounce buffer and commits
- * the result with another URING_CMD, which also fetches the next request
- * for that tag. A request is served by the queue of the CPU it was issued
- * on, so requests from different CPUs do not wait for each other here.
- * Control (add, params, start, stop, delete) goes the same way to
- * /dev/ublk-control.
+ * answers with vbd_read or vbd_write and commits the result with another
+ * URING_CMD, which also fetches the next request for that tag. A request
+ * is served by the queue of the CPU it was issued on, so requests from
+ * different CPUs do not wait for each other here. Control (add, params,
+ * start, stop, delete) goes the same way to /dev/ublk-control.
  *
- * ponytail: bounce buffers, 64 of 256 KiB for every queue, touched only as
- * tags come into use; zero copy or UBLK_F_USER_COPY when the memory or the
- * memcpy shows. Queue threads are not pinned to their CPU, the driver does
- * not ask for it; pin them (UBLK_U_CMD_GET_QUEUE_AFFINITY) if cache misses
- * show.
+ * The data itself moves by UBLK_F_USER_COPY: a pread or pwrite on
+ * /dev/ublkcN, at an offset that names the queue and the tag, copies
+ * straight between the pages of the request and our buffer. A queue thread
+ * serves one request at a time, so it needs one buffer, not one per tag.
+ * It is still a copy and not zero copy on purpose: the engine checksums
+ * every byte it stores, so the data has to pass through our memory anyway.
+ *
+ * ponytail: queue threads are not pinned to their CPU, the driver does not
+ * ask for it; pin them (UBLK_U_CMD_GET_QUEUE_AFFINITY) if cache misses show.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -49,7 +52,7 @@ struct queue {
 	bool ring_ok;
 	struct io_uring ring;
 	struct ublksrv_io_desc *iod;		/* DEPTH descriptors, mapped from the driver */
-	uint8_t *buf;				/* DEPTH bounce buffers of MAX_IO */
+	uint8_t *buf;				/* MAX_IO bytes: the data of the request being served */
 };
 
 struct srv {
@@ -101,6 +104,7 @@ static int add_dev(struct srv *s)
 	struct ublksrv_ctrl_dev_info info = {
 		.nr_hw_queues = s->nq, .queue_depth = DEPTH,
 		.max_io_buf_bytes = MAX_IO, .dev_id = -1,
+		.flags = UBLK_F_USER_COPY,
 	};
 	struct ublksrv_ctrl_cmd c = { .addr = (uintptr_t)&info, .len = sizeof(info) };
 	int ret = ctrl(s, UBLK_U_CMD_ADD_DEV, &c);
@@ -109,7 +113,8 @@ static int add_dev(struct srv *s)
 		return ret;
 	s->dev_id = info.dev_id;		/* filled in by the driver ... */
 	s->nq = info.nr_hw_queues;		/* ... which may also grant fewer queues */
-	return 0;
+	/* a driver from before Linux 6.5 drops the flag instead of refusing it */
+	return info.flags & UBLK_F_USER_COPY ? 0 : -EOPNOTSUPP;
 }
 
 static int set_params(struct srv *s)
@@ -198,12 +203,10 @@ static void teardown(struct srv *s)
 		close(s->ctl);
 }
 
+/* With user copy the command names no buffer: there is none the driver writes to. */
 static void queue_cmd(struct queue *q, unsigned tag, unsigned op, int result)
 {
-	struct ublksrv_io_cmd c = {
-		.q_id = q->id, .tag = tag, .result = result,
-		.addr = (uintptr_t)(q->buf + (size_t)tag * MAX_IO),
-	};
+	struct ublksrv_io_cmd c = { .q_id = q->id, .tag = tag, .result = result };
 
 	prep_cmd(&q->ring, q->s->ch, op, &c, sizeof(c), tag);
 }
@@ -212,20 +215,37 @@ static void queue_cmd(struct queue *q, unsigned tag, unsigned op, int result)
 static int do_io(struct queue *q, unsigned tag)
 {
 	const struct ublksrv_io_desc *d = &q->iod[tag];
-	uint8_t *buf = q->buf + (size_t)tag * MAX_IO;
 	struct vbd *v = q->s->v;
+	int ch = q->s->ch;
 	uint64_t off = d->start_sector << 9;
 	size_t len = (size_t)d->nr_sectors << 9;
+	/* where on /dev/ublkcN the data of this queue's request @tag is found */
+	off_t data = UBLKSRV_IO_BUF_OFFSET +
+		     (((uint64_t)q->id << UBLK_QID_OFF) | ((uint64_t)tag << UBLK_TAG_OFF));
+	ssize_t n;
 
 	switch (ublksrv_get_op(d)) {
-	case UBLK_IO_OP_READ:	return vbd_read(v, buf, len, off);
-	case UBLK_IO_OP_WRITE:	return vbd_write(v, buf, len, off);
-	case UBLK_IO_OP_FLUSH:	return vbd_flush(v);
-	default:		return -EOPNOTSUPP;
+	case UBLK_IO_OP_READ:
+		if (len > MAX_IO)
+			return -EINVAL;
+		n = vbd_read(v, q->buf, len, off);
+		if (n > 0 && pwrite(ch, q->buf, n, data) != n)
+			return -EIO;	/* our bytes did not reach the request */
+		return n;
+	case UBLK_IO_OP_WRITE:
+		if (len > MAX_IO)
+			return -EINVAL;
+		if (pread(ch, q->buf, len, data) != (ssize_t)len)
+			return -EIO;	/* the request's bytes did not reach us */
+		return vbd_write(v, q->buf, len, off);
+	case UBLK_IO_OP_FLUSH:
+		return vbd_flush(v);
+	default:
+		return -EOPNOTSUPP;
 	}
 }
 
-/* A queue's ring, its view of the driver's descriptors, its buffers, and a fetch for every tag. */
+/* A queue's ring, its view of the driver's descriptors, its buffer, and a fetch for every tag. */
 static int queue_init(struct queue *q)
 {
 	struct srv *s = q->s;
@@ -243,7 +263,7 @@ static int queue_init(struct queue *q)
 		q->iod = NULL;
 		return -errno;
 	}
-	q->buf = malloc((size_t)DEPTH * MAX_IO);
+	q->buf = malloc(MAX_IO);
 	if (!q->buf)
 		return -ENOMEM;
 	for (unsigned tag = 0; tag < DEPTH; tag++)

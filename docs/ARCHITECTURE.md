@@ -122,8 +122,10 @@ them do not know about each other.
 
 `vbd serve` is one process with a main thread and a queue thread for every
 CPU, talking to the kernel's ublk driver through three device nodes. Every arrow is an io_uring `URING_CMD`:
-io_uring carries messages here, not data; the data moves by `copy_to_user`
-and `copy_from_user` into buffers the server owns.
+io_uring carries messages here, not data. The data moves when a queue
+thread calls `pread` or `pwrite` on `/dev/ublkcN` at an offset that names
+its queue and the tag (`UBLK_F_USER_COPY`), which copies between the pages
+of the request and the thread's one buffer.
 
 ```
  vbd serve (one process, root)              kernel: ublk_drv
@@ -138,7 +140,7 @@ and `copy_from_user` into buffers the server owns.
  |  ring  ---------------------+----------->|  the server's side of N:  |
  |  FETCH, COMMIT_AND_FETCH    |            |  one command parked per   |
  |  iod[64]  <-- mmap ---------+------------+  tag, iod[tag] describes  |
- |  buf[64]  <-- copy to/from -+------------+  the request for that tag |
+ |  buf  <-- pread / pwrite ---+------------+  the request for that tag |
  |  vbd_read vbd_write vbd_flush            +-------------+-------------+
  +--------------+--------------+                          ^ block requests
                 |                                         |
@@ -150,9 +152,10 @@ and `copy_from_user` into buffers the server owns.
 ```
 
 The device has one queue per CPU. Each queue is a thread here with a ring,
-a descriptor array and 64 bounce buffers of its own, so nothing is shared
-between queues but the volume, and a request issued on one CPU does not
-wait behind one issued on another.
+a descriptor array and a buffer of its own, so nothing is shared between
+queues but the volume, and a request issued on one CPU does not wait
+behind one issued on another. One 256 KiB buffer is enough for a queue: its
+thread serves one request at a time, and copies the data itself.
 
 One request, by tag:
 
@@ -161,14 +164,13 @@ One request, by tag:
    `/dev/ublkbN` appears.
 2. Someone reads or writes `/dev/ublkbN`. The block layer forms a request
    on the queue of the CPU it runs on; the driver takes a free tag of that
-   queue, writes op, sector and length into its `iod[tag]`, copies the
-   data into `buf[tag]` for a write, and completes the parked command. That
-   queue's thread sees a CQE carrying the tag.
-3. The thread reads `iod[tag]` and calls `vbd_read`, `vbd_write` or
-   `vbd_flush` on `buf[tag]`.
+   queue, writes op, sector and length into its `iod[tag]`, and completes
+   the parked command. That queue's thread sees a CQE carrying the tag.
+3. The thread reads `iod[tag]`. For a write it `pread`s the request's data
+   into its buffer and calls `vbd_write`; for a read it calls `vbd_read`
+   and `pwrite`s the result into the request; a flush is `vbd_flush`.
 4. It sends `COMMIT_AND_FETCH_REQ` with the tag and the result. The driver
-   copies `buf[tag]` out for a read, ends the block request, and parks the
-   command again for the next one.
+   ends the block request and parks the command again for the next one.
 5. On SIGINT or SIGTERM the main thread sends `STOP_DEV`: every parked
    command completes with an abort, the queue threads exit, the server
    closes `/dev/ublkcN`, and `DEL_DEV` removes both nodes.

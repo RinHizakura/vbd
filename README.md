@@ -39,6 +39,8 @@ come in as submodules. Serving a block device needs the kernel's ublk
 driver, `CONFIG_BLK_DEV_UBLK` (`modprobe ublk_drv`), which mainstream
 distributions have shipped as a module since Linux 6.0.
 
+`vbd serve` needs Linux 6.5 or later, for `UBLK_F_USER_COPY`.
+
 The tests also use `busybox` for a local HTTP server, and `sudo -n` plus
 `mkfs.ext4` for the block device test; both are skipped when unavailable.
 
