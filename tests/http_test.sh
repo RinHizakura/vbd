@@ -40,8 +40,8 @@ printf 'over http' | "$VBD" write t.log 70000
 "$VBD" read t.log 0 1M | cmp -s - expect.img || fail "read-modify-write"
 
 # a manifest catches content that changed behind an unchanged size and date
-"$VBD" sums www/base.img 64K > base.sums
-"$VBD" create s.log 2M 64K "$url" base.sums
+"$VBD" manifest www/base.img 64K > base.manifest
+"$VBD" create s.log 2M 64K "$url" base.manifest
 "$VBD" read s.log 0 64K > got.bin
 head -c 64K www/base.img | cmp -s - got.bin || fail "fetch through a manifest"
 cp -p www/base.img keep.img

@@ -66,14 +66,14 @@ Done:
 - Offline open: a base that cannot be probed leaves the volume open with
   `vbd_base_err` set; cached chunks read, misses return that error. Only a
   base that answers and has changed is refused.
-- Manifest: `vbd sums <image> <chunk>` writes the sha256 of every chunk of
-  an image, and `vbd create ... base sums` takes it. It is kept as
-  `disk.log.sums` and its own sha256 goes in the super block, so the copy
-  cannot be swapped unnoticed. Every chunk fetched from the base is hashed
-  and compared before it enters the cache; one that differs is not stored
-  and the read fails with EIO. `tests/http_test.sh` changes a byte of the
-  image behind an unchanged size and date and expects that chunk, and only
-  that chunk, to be refused.
+- Manifest: `vbd manifest <image> <chunk>` writes the sha256 of every
+  chunk of an image, and `vbd create ... base manifest` takes it. It is
+  kept as `disk.log.manifest` and its own sha256 goes in the super block,
+  so the copy cannot be swapped unnoticed. Every chunk fetched from the
+  base is hashed and compared before it enters the cache; one that differs
+  is not stored and the read fails with EIO. `tests/http_test.sh` changes
+  a byte of the image behind an unchanged size and date and expects that
+  chunk, and only that chunk, to be refused.
 - The cache file is shared between processes, a volume's writer and views
   of it: an append takes a `flock`, reads in what the others appended and
   drops its own record if the chunk is there by now, and a miss looks at

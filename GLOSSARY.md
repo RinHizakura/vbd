@@ -27,7 +27,7 @@ _Avoid_: backing file, parent, golden image
 The checksum of every chunk of a base, made from a trusted copy of it and
 given to a volume when it is created, against which each chunk that later
 arrives from the base is checked.
-_Avoid_: sums (the command and file name), hash list, signature
+_Avoid_: sums, checksum file, hash list, signature
 
 **Fetched**:
 The number of distinct base chunks a volume holds in its base cache.

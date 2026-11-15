@@ -466,13 +466,13 @@ static void test_open_at(void)
  * (test_bad_record). What was appended after the checkpoint is replayed on
  * top of it, and a damaged checkpoint means a full replay.
  */
-/* Write a manifest of the base to <base>.sums, wrong for @bad_chunk (-1: for none). */
-static void write_sums(char *path, size_t path_len, int bad_chunk)
+/* Write a manifest of the base to <base>.manifest, wrong for @bad_chunk (-1: for none). */
+static void write_manifest(char *path, size_t path_len, int bad_chunk)
 {
 	uint8_t sum[SHA256_LEN];
 	FILE *f;
 
-	snprintf(path, path_len, "%s.sums", base_path);
+	snprintf(path, path_len, "%s.manifest", base_path);
 	f = fopen(path, "w");
 	assert(f);
 	for (size_t c = 0; c < SIZE / 2 / CHUNK; c++) {
@@ -489,14 +489,14 @@ static void write_sums(char *path, size_t path_len, int bad_chunk)
  * refused and stays out of the cache. The manifest kept with the volume is
  * itself pinned by the super block.
  */
-static void test_sums(void)
+static void test_manifest(void)
 {
 	static const uint8_t abc[SHA256_LEN] = {	/* sha256("abc"), FIPS 180-4 */
 		0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde,
 		0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
 		0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad };
 	struct vbd *v = setup();
-	char sums[sizeof(base_path) + 8], kept[sizeof(log_path) + 8];
+	char manifest[sizeof(base_path) + 16], kept[sizeof(log_path) + 16];
 	uint8_t sum[SHA256_LEN];
 
 	sha256("abc", 3, sum);
@@ -504,10 +504,10 @@ static void test_sums(void)
 
 	vbd_close(v);				/* setup's volume has no manifest: make one that has */
 	assert(system("rm -f /tmp/vbd-base-*.log /tmp/vbd-base-*.log.cache") == 0);
-	write_sums(sums, sizeof(sums), 3);	/* says something else about chunk 3 */
-	assert(vbd_create(log_path, SIZE, 2 * CHUNK, base_path, sums) == -EINVAL);	/* other chunk size */
-	assert(vbd_create(log_path, SIZE, CHUNK, NULL, sums) == -EINVAL);		/* of what base? */
-	assert(vbd_create(log_path, SIZE, CHUNK, base_path, sums) == 0);
+	write_manifest(manifest, sizeof(manifest), 3);	/* says something else about chunk 3 */
+	assert(vbd_create(log_path, SIZE, 2 * CHUNK, base_path, manifest) == -EINVAL);	/* other chunk size */
+	assert(vbd_create(log_path, SIZE, CHUNK, NULL, manifest) == -EINVAL);		/* of what base? */
+	assert(vbd_create(log_path, SIZE, CHUNK, base_path, manifest) == 0);
 
 	v = vbd_open(log_path);
 	assert(v);
@@ -520,7 +520,7 @@ static void test_sums(void)
 	assert(memcmp(buf, ref + 4 * CHUNK, CHUNK) == 0);
 	vbd_close(v);
 
-	snprintf(kept, sizeof(kept), "%s.sums", log_path);
+	snprintf(kept, sizeof(kept), "%s.manifest", log_path);
 	flip_bit(kept, 3 * SHA256_LEN);		/* "repair" chunk 3 in the kept copy */
 	assert(vbd_open(log_path) == NULL && errno == EINVAL);
 	teardown(NULL);
@@ -768,7 +768,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
-	RUN(test_sums);
+	RUN(test_manifest);
 	RUN(test_one_writer);
 	RUN(test_shared_cache);
 	RUN(test_view_keeps_tail);

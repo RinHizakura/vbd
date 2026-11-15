@@ -32,14 +32,15 @@ struct vbd;
  * chunks: a power of two, 16 at least, that divides @size. @base_path may be NULL for an all-zero base; it is stored as an
  * absolute path.
  *
- * @sums_path may name a manifest of the base, as `vbd sums` writes it: the
- * sha256 of each of its chunks. It is kept with the volume, and from then
- * on a chunk fetched from the base that does not match it is not cached and
- * the read that needed it fails with -EIO. NULL for none; -EINVAL if it
- * was not made from this base at this chunk size, or if there is no base.
+ * @manifest_path may name a manifest of the base, as `vbd manifest` writes
+ * it: the sha256 of each of its chunks. It is kept with the volume, and
+ * from then on a chunk fetched from the base that does not match it is not
+ * cached and the read that needed it fails with -EIO. NULL for none;
+ * -EINVAL if it was not made from this base at this chunk size, or if
+ * there is no base.
  */
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
-	       const char *base_path, const char *sums_path);
+	       const char *base_path, const char *manifest_path);
 
 /*
  * Open a log and its base, for reading and writing. One open at a time: a

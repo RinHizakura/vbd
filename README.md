@@ -60,13 +60,13 @@ volume whose base was modified refuses to open.
 
 ```
 usage: vbd <command> ...
-  create   <log> <size> <chunk> [base [sums]]   new volume; sizes take K, M, G suffixes
-  info     <log> [snapshot]                     print size, chunk size, epoch, chunks fetched, base state
-  read     <log> <off> <len> [snapshot]         copy a range to stdout, as of a snapshot if given
-  write    <log> <off>                          copy stdin to the volume and flush
-  snapshot <log>                                freeze the current content; prints the snapshot number
-  serve    <log> [snapshot]                     expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
-  sums     <image> <chunk>                      write the manifest of a base image to stdout, for create's [sums]
+  create   <log> <size> <chunk> [base [manifest]]   new volume; sizes take K, M, G suffixes
+  info     <log> [snapshot]                         print size, chunk size, epoch, chunks fetched, base state
+  read     <log> <off> <len> [snapshot]             copy a range to stdout, as of a snapshot if given
+  write    <log> <off>                              copy stdin to the volume and flush
+  snapshot <log>                                    freeze the current content; prints the snapshot number
+  serve    <log> [snapshot]                         expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
+  manifest <image> <chunk>                          write the manifest of a base image to stdout, for create's [manifest]
 ```
 
 Sizes and offsets accept `K`, `M` and `G` suffixes. For example:
@@ -97,8 +97,8 @@ manifest of it: the sha256 of every chunk, made from a copy you trust. A
 chunk that arrives from the base and does not match is refused, not cached:
 
 ```sh
-vbd sums ubuntu.img 64K > ubuntu.sums
-vbd create disk.log 1G 64K https://images.example/ubuntu.img ubuntu.sums
+vbd manifest ubuntu.img 64K > ubuntu.manifest
+vbd create disk.log 1G 64K https://images.example/ubuntu.img ubuntu.manifest
 ```
 
 One process at a time can have a volume open for writing. While it is

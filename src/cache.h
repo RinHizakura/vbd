@@ -32,11 +32,11 @@ struct super;
 
 /*
  * Create the cache file for the new volume at @log_path, whose sealed
- * super block is @sb. Only for a volume with a base. @sums is the base's
- * manifest if the volume has one (super_set_sums), else NULL; it is stored
- * next to the cache file.
+ * super block is @sb. Only for a volume with a base. @manifest is the
+ * base's manifest if the volume has one (super_set_manifest), else NULL; it
+ * is stored next to the cache file.
  */
-int cache_create(const char *log_path, const struct super *sb, const uint8_t *sums);
+int cache_create(const char *log_path, const struct super *sb, const uint8_t *manifest);
 
 /*
  * Open the cache of the volume at @log_path, whose super block is @sb.

@@ -53,42 +53,42 @@ int super_check_base(const struct super *sb)
 	return size == sb->base_size && !strcmp(tag, sb->base_tag) ? 0 : -ESTALE;
 }
 
-size_t super_sums_len(const struct super *sb)
+size_t super_manifest_len(const struct super *sb)
 {
 	return (sb->base_size + sb->chunk_size - 1) / sb->chunk_size * SHA256_LEN;
 }
 
-int super_set_sums(struct super *sb, const char *path, uint8_t **sums)
+int super_set_manifest(struct super *sb, const char *path, uint8_t **manifest)
 {
-	size_t len = super_sums_len(sb);
+	size_t len = super_manifest_len(sb);
 	int ret;
 
-	*sums = malloc(len + 1);
-	if (!*sums)
+	*manifest = malloc(len + 1);
+	if (!*manifest)
 		return -ENOMEM;
-	ret = read_exact(path, *sums, len);
+	ret = read_exact(path, *manifest, len);
 	if (ret) {
-		free(*sums);
-		*sums = NULL;
+		free(*manifest);
+		*manifest = NULL;
 		return ret;
 	}
-	sha256(*sums, len, sb->sums_hash);
+	sha256(*manifest, len, sb->manifest_hash);
 	return 0;
 }
 
-bool super_has_sums(const struct super *sb)
+bool super_has_manifest(const struct super *sb)
 {
 	static const uint8_t none[SHA256_LEN];
 
-	return memcmp(sb->sums_hash, none, SHA256_LEN) != 0;
+	return memcmp(sb->manifest_hash, none, SHA256_LEN) != 0;
 }
 
-bool super_check_sums(const struct super *sb, const uint8_t *sums)
+bool super_check_manifest(const struct super *sb, const uint8_t *manifest)
 {
 	uint8_t hash[SHA256_LEN];
 
-	sha256(sums, super_sums_len(sb), hash);
-	return !memcmp(hash, sb->sums_hash, SHA256_LEN);
+	sha256(manifest, super_manifest_len(sb), hash);
+	return !memcmp(hash, sb->manifest_hash, SHA256_LEN);
 }
 
 void super_seal(struct super *sb)

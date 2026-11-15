@@ -32,7 +32,7 @@ static int usage(void)
 {
 	fputs("usage: vbd <command> ...\n", stderr);
 	for (const struct cmd *c = cmds; c->name; c++)
-		fprintf(stderr, "  %-8s %-36s %s\n", c->name, c->args, c->help);
+		fprintf(stderr, "  %-8s %-40s %s\n", c->name, c->args, c->help);
 	return 2;
 }
 
@@ -75,7 +75,7 @@ static int cmd_create(const char *log, char **args, int n)
  * The manifest of an image: one sha256 per chunk, a short last chunk padded
  * with zeros, which is how the engine reads it.
  */
-static int cmd_sums(const char *image, char **args, int n)
+static int cmd_manifest(const char *image, char **args, int n)
 {
 	uint8_t *buf, sum[SHA256_LEN];
 	uint64_t chunk;
@@ -87,7 +87,7 @@ static int cmd_sums(const char *image, char **args, int n)
 	f = fopen(image, "r");
 	buf = malloc(chunk);
 	if (!f || !buf) {
-		fprintf(stderr, "vbd sums: %s: %s\n", image, strerror(errno));
+		fprintf(stderr, "vbd manifest: %s: %s\n", image, strerror(errno));
 		return 1;
 	}
 	while ((got = fread(buf, 1, chunk, f)) > 0) {
@@ -96,7 +96,7 @@ static int cmd_sums(const char *image, char **args, int n)
 		fwrite(sum, 1, sizeof(sum), stdout);
 	}
 	if (ferror(f) || fflush(stdout)) {
-		fprintf(stderr, "vbd sums: %s\n", strerror(errno));
+		fprintf(stderr, "vbd manifest: %s\n", strerror(errno));
 		return 1;
 	}
 	fclose(f);
@@ -198,7 +198,7 @@ out:
 }
 
 static const struct cmd cmds[] = {
-	{ "create", "<log> <size> <chunk> [base [sums]]", "new volume; sizes take K, M, G suffixes",
+	{ "create", "<log> <size> <chunk> [base [manifest]]", "new volume; sizes take K, M, G suffixes",
 	  2, 4, .make = cmd_create },
 	{ "info", "<log> [snapshot]", "print size, chunk size, epoch, chunks fetched, base state",
 	  0, 1, .at = true, .run = cmd_info },
@@ -210,8 +210,8 @@ static const struct cmd cmds[] = {
 	  0, 0, .run = cmd_snapshot },
 	{ "serve", "<log> [snapshot]", "expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root",
 	  0, 1, .at = true, .run = cmd_serve },
-	{ "sums", "<image> <chunk>", "write the manifest of a base image to stdout, for create's [sums]",
-	  1, 1, .make = cmd_sums },
+	{ "manifest", "<image> <chunk>", "write the manifest of a base image to stdout, for create's [manifest]",
+	  1, 1, .make = cmd_manifest },
 	{ NULL }
 };
 #define MAX_ARGS	3	/* the largest max of a run command above */

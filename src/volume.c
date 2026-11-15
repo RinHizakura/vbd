@@ -40,25 +40,25 @@ static bool writable(const struct vbd *v)
 }
 
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
-	       const char *base_path, const char *sums_path)
+	       const char *base_path, const char *manifest_path)
 {
 	struct super sb;
-	uint8_t *sums = NULL;
+	uint8_t *manifest = NULL;
 	int ret = super_init(&sb, size, chunk_size);
 
 	if (ret)
 		return ret;
-	if (sums_path && !base_path)
+	if (manifest_path && !base_path)
 		return -EINVAL;
 	if (base_path && (ret = super_set_base(&sb, base_path)))
 		return ret;
-	if (sums_path && (ret = super_set_sums(&sb, sums_path, &sums)))
+	if (manifest_path && (ret = super_set_manifest(&sb, manifest_path, &manifest)))
 		return ret;
 	super_seal(&sb);
 	ret = log_create(log_path, &sb);
-	if (!ret && base_path && (ret = cache_create(log_path, &sb, sums)))
+	if (!ret && base_path && (ret = cache_create(log_path, &sb, manifest)))
 		unlink(log_path);
-	free(sums);
+	free(manifest);
 	return ret;
 }
 
