@@ -5,6 +5,12 @@ serves a disk that is forked from a shared image in O(1), fetches the image
 lazily from wherever it lives, and keeps every write so the disk can be
 reopened at any earlier moment.
 
+```sh
+vbd create golden.log 1G 64K https://images.example/ubuntu.img   # nothing is downloaded yet
+vbd fork golden.log job1.log    # 4 KiB, whatever the size of the image
+sudo vbd serve job1.log         # /dev/ublkbN: mkfs, mount, dd, a VM all work on it
+```
+
 It ships in three parts:
 
 | Part | What it is | Status |
