@@ -711,6 +711,51 @@ static void test_shared_cache(void)
 }
 
 /*
+ * The same, of the log alone: two opens of one file as a shared log. Each
+ * sees what the other appended once it has had a turn at the file, a chunk
+ * both add is in the file once, and the first to arrive stays.
+ */
+static void test_shared_log(void)
+{
+	char path[] = "/tmp/vbd-shared-XXXXXX";
+	uint8_t super[SUPER_SIZE] = { 0 }, x[CHUNK], y[CHUNK];
+	struct log a, b;
+	struct stat st;
+
+	close(mkstemp(path));
+	unlink(path);
+	assert(log_create(path, super) == 0);
+	log_init(&a);
+	log_init(&b);
+	assert(log_open(&a, path, super) == 0 && log_open(&b, path, super) == 0);
+	assert(log_load(&a, CHUNK, 16, LOG_SHARED, 0) == 0);
+	assert(log_load(&b, CHUNK, 16, LOG_SHARED, 0) == 0);
+
+	fill_random(x, CHUNK); fill_random(y, CHUNK);
+	assert(log_append_if(&a, 3, x, LOG_ABSENT) == 0);
+	assert(!log_has(&b, 3));			/* not looked yet */
+	assert(log_refresh(&b) == 0 && log_has(&b, 3));
+	assert(log_append_if(&b, 3, y, LOG_ABSENT) == -EAGAIN);	/* a was first */
+	assert(log_append_if(&b, 4, y, LOG_ABSENT) == 0);
+	assert(log_append_if(&a, 4, x, LOG_ABSENT) == -EAGAIN);	/* seen without a refresh: appending is a turn */
+	assert(stat(path, &st) == 0 && st.st_size == SUPER_SIZE + 2 * REC);
+	assert(log_read(&b, 3, buf, 0, CHUNK) == 0 && memcmp(buf, x, CHUNK) == 0);
+	assert(log_read(&a, 4, buf, 0, CHUNK) == 0 && memcmp(buf, y, CHUNK) == 0);
+	log_close(&a);
+	log_close(&b);
+
+	log_init(&a);					/* and a writer finds both */
+	assert(log_open(&a, path, super) == 0);
+	assert(log_load(&a, CHUNK, 16, LOG_WRITER, 0) == 0 && log_chunks(&a) == 2);
+	log_init(&b);
+	assert(log_open(&b, path, super) == 0);
+	assert(log_load(&b, CHUNK, 16, LOG_WRITER, 0) == -EBUSY);
+	log_close(&b);
+	log_close(&a);
+	unlink(path);
+}
+
+/*
  * A fork starts out as its parent was at the fork and goes its own way
  * from there, as does the parent. A fork of a fork reads down the chain,
  * and all of them fetch into the one cache at the bottom.
@@ -1000,6 +1045,7 @@ int main(void)
 	RUN(test_manifest);
 	RUN(test_one_writer);
 	RUN(test_shared_cache);
+	RUN(test_shared_log);
 	RUN(test_view_keeps_tail);
 	RUN(test_checkpoint);
 	RUN(test_cache_checkpoint);

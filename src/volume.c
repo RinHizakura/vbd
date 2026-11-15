@@ -23,14 +23,12 @@
 #include "log.h"
 #include "super.h"
 
-/* vbd.at value for a normal, writable open */
-#define LIVE		ALL_EPOCHS
+_Static_assert(VBD_HEAD == ALL_EPOCHS, "vbd_at is log_at");
 
 struct vbd {
 	uint64_t size;
 	uint32_t chunk_size;
-	uint64_t at;		/* LIVE, or the snapshot this read-only view shows */
-	struct log data;	/* what the volume was written with */
+	struct log data;	/* what the volume was written with; a view of it for a snapshot view */
 	/* what it holds where it was never written comes from one of these two: */
 	struct vbd *parent;	/* a fork: the volume it was forked from, as of the fork */
 	struct cache *cache;	/* otherwise: the base cache */
@@ -39,7 +37,7 @@ struct vbd {
 /* Opened with vbd_open: the newest content, writable. Not a snapshot view. */
 static bool writable(const struct vbd *v)
 {
-	return v->at == LIVE;
+	return log_at(&v->data) == ALL_EPOCHS;
 }
 
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
@@ -65,10 +63,6 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	return ret;
 }
 
-/*
- * Open the volume as of @snapshot, LIVE for as it is now and writable. With
- * @before, as of the newest snapshot taken by that time instead.
- */
 int vbd_fork(const char *parent_path, uint64_t snapshot, const char *log_path)
 {
 	struct super sb;
@@ -98,8 +92,8 @@ int vbd_fork(const char *parent_path, uint64_t snapshot, const char *log_path)
 	return log_create(log_path, &sb);
 }
 
-static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
-			       const int64_t *before)
+/* Open the volume with its data log loaded as @as, @arg (see log_load). */
+static struct vbd *open_volume(const char *log_path, enum log_as as, uint64_t arg)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
 	struct super sb;
@@ -107,7 +101,6 @@ static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
 
 	if (!v)
 		return NULL;
-	v->at = snapshot;
 	log_init(&v->data);
 
 	if ((err = log_open(&v->data, log_path, &sb)))
@@ -116,10 +109,6 @@ static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
 		err = -EINVAL;
 		goto fail;
 	}
-	if (before && (err = log_snapshot_before(&v->data, sb.chunk_size, *before, &v->at)))
-		goto fail;	/* -ENOENT: no snapshot that old */
-	if (writable(v) && (err = log_lock(&v->data)))
-		goto fail;	/* someone else is writing it */
 	v->size = sb.size;
 	v->chunk_size = sb.chunk_size;
 	if (super_parent(&sb)) {
@@ -141,12 +130,9 @@ static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
 			goto fail;
 		}
 	}
-	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, v->at)))
+	/* -EBUSY: someone else is writing it; -ENOENT: no such snapshot */
+	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, as, arg)))
 		goto fail;
-	if (!writable(v) && v->at >= log_epoch(&v->data)) {
-		err = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
-		goto fail;
-	}
 	return v;
 fail:
 	vbd_close(v);
@@ -156,17 +142,17 @@ fail:
 
 struct vbd *vbd_open(const char *log_path)
 {
-	return open_volume(log_path, LIVE, NULL);
+	return open_volume(log_path, LOG_WRITER, 0);
 }
 
 struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 {
-	return open_volume(log_path, snapshot, NULL);
+	return open_volume(log_path, LOG_AT, snapshot);
 }
 
 struct vbd *vbd_open_before(const char *log_path, int64_t when)
 {
-	return open_volume(log_path, 0, &when);
+	return open_volume(log_path, LOG_BEFORE, when);
 }
 
 void vbd_close(struct vbd *v)
@@ -181,7 +167,7 @@ void vbd_close(struct vbd *v)
 
 uint64_t vbd_size(const struct vbd *v)		{ return v->size; }
 uint32_t vbd_chunk_size(const struct vbd *v)	{ return v->chunk_size; }
-uint64_t vbd_at(const struct vbd *v)		{ return v->at; }
+uint64_t vbd_at(const struct vbd *v)		{ return log_at(&v->data); }
 
 /* The base cache at the bottom of a chain of forks; the one all of them fetch into. */
 static struct cache *base_cache(const struct vbd *v)

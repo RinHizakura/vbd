@@ -318,6 +318,7 @@ int log_create(const char *path, const void *super)
 
 void log_init(struct log *l)
 {
+	memset(l, 0, sizeof(*l));
 	l->fd = -1;
 	xa_init(&l->map);
 	pthread_mutex_init(&l->append_lock, NULL);
@@ -329,13 +330,6 @@ int log_open(struct log *l, const char *path, void *super)
 	if (l->fd < 0)
 		return -errno;
 	return full_pread(l->fd, super, SUPER_SIZE, 0);
-}
-
-int log_lock(struct log *l)
-{
-	if (!flock(l->fd, LOCK_EX | LOCK_NB))
-		return 0;
-	return errno == EWOULDBLOCK ? -EBUSY : -errno;
 }
 
 /*
@@ -399,21 +393,20 @@ out:
 	return ret;
 }
 
-int log_snapshot_before(struct log *l, uint32_t chunk_size, int64_t when,
-			uint64_t *snapshot)
+/* The number of the newest snapshot taken at or before @when, or -ENOENT. */
+static int snapshot_before(struct log *l, int64_t when, uint64_t *snapshot)
 {
 	struct ckpt_hdr h;
 	struct stat st;
 	uint64_t rec;
 	int ret;
 
-	l->chunk_size = chunk_size;	/* where the records lie */
 	if (fstat(l->fd, &st))
 		return -errno;
 	if (st.st_size < SUPER_SIZE)
 		return -ENOENT;
 	/* back from the end: the first snapshot old enough is the newest one that is */
-	for (rec = (st.st_size - SUPER_SIZE) / (HDR_SIZE + chunk_size); rec-- > 0; ) {
+	for (rec = (st.st_size - SUPER_SIZE) / (HDR_SIZE + l->chunk_size); rec-- > 0; ) {
 		if ((ret = rec_read_hdr(l, rec, &h)))
 			return ret;
 		if (h.magic == CKPT_MAGIC && h.next_epoch == h.epoch + 1 &&
@@ -425,28 +418,88 @@ int log_snapshot_before(struct log *l, uint32_t chunk_size, int64_t when,
 	return -ENOENT;
 }
 
-int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto)
+/*
+ * A shared log's turn at the file. Its other opens, a view of the volume in
+ * another process say, append to it too: the file lock keeps them out, and
+ * the threads of this process, which share that lock, queue on
+ * l->append_lock, which the caller holds. Until end_turn the map is the
+ * file. A log that is not shared has the file to itself: nothing to do.
+ */
+static int file_lock(struct log *l)
+{
+	while (l->shared && flock(l->fd, LOCK_EX))
+		if (errno != EINTR)
+			return -errno;
+	return 0;
+}
+
+/* Take the turn and read in what the others appended. End it either way. */
+static int begin_turn(struct log *l)
+{
+	int ret;
+
+	if (!l->shared)
+		return 0;
+	if (!l->loaded)
+		return -EINVAL;
+	ret = file_lock(l);
+	if (!ret)
+		ret = log_replay(l);
+	if (ret)
+		l->loaded = false;	/* the map is no longer the file */
+	return ret;
+}
+
+static void end_turn(struct log *l)
+{
+	if (l->shared)
+		flock(l->fd, LOCK_UN);
+}
+
+int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks,
+	     enum log_as as, uint64_t arg)
 {
 	int ret;
 
 	l->chunk_size = chunk_size;
 	l->nchunks = nchunks;
-	l->upto = upto;
-	ret = ckpt_load(l) ? 0 : log_replay(l);
+	l->upto = ALL_EPOCHS;
+	switch (as) {
+	case LOG_WRITER:
+		if (flock(l->fd, LOCK_EX | LOCK_NB))	/* held until close */
+			return errno == EWOULDBLOCK ? -EBUSY : -errno;
+		break;
+	case LOG_SHARED:
+		l->shared = true;
+		break;
+	case LOG_BEFORE:
+		if ((ret = snapshot_before(l, arg, &arg)))
+			return ret;
+		/* fall through */
+	case LOG_AT:
+		if (arg == ALL_EPOCHS)
+			return -ENOENT;
+		l->upto = arg;
+	}
+	ret = file_lock(l);	/* loading is a turn too */
+	if (!ret)
+		ret = ckpt_load(l) ? 0 : log_replay(l);
+	end_turn(l);
 	l->loaded = !ret;
+	if (!ret && l->upto != ALL_EPOCHS && l->upto >= l->epoch)
+		ret = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
 	return ret;
 }
 
-int log_catch_up(struct log *l)
+uint64_t log_at(const struct log *l)	{ return l->upto; }
+
+int log_refresh(struct log *l)
 {
 	int ret;
 
-	if (!l->loaded)
-		return -EINVAL;
 	pthread_mutex_lock(&l->append_lock);
-	ret = log_replay(l);
-	if (ret)
-		l->loaded = false;	/* the map is no longer the file */
+	ret = begin_turn(l);
+	end_turn(l);
 	pthread_mutex_unlock(&l->append_lock);
 	return ret;
 }
@@ -463,7 +516,9 @@ static void log_checkpoint(struct log *l)
 	if (!takes_checkpoints(l))
 		return;
 	pthread_mutex_lock(&l->append_lock);
-	ckpt_save(l);
+	if (!begin_turn(l))	/* a log that cannot catch up does not checkpoint */
+		ckpt_save(l);
+	end_turn(l);
 	pthread_mutex_unlock(&l->append_lock);
 }
 
@@ -497,26 +552,30 @@ uint64_t log_version(const struct log *l, uint64_t chunk)
 	return e ? xa_to_value(e) : LOG_ABSENT;
 }
 
-/* Append @data for @chunk; with @version, only if that is still what the log holds. */
-static int append(struct log *l, uint64_t chunk, const uint8_t *data, const uint64_t *version)
+/*
+ * Append the record of header @h and @data; with @version, only if that is
+ * still what the log holds of the header's chunk.
+ */
+static int append(struct log *l, struct rec_hdr *h, const uint8_t *data, const uint64_t *version)
 {
-	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk };
 	int ret;
 
-	rec_seal(l, &h, data);	/* the costly part, done before the lock */
+	rec_seal(l, h, data);	/* the costly part, done before the lock */
 	pthread_mutex_lock(&l->append_lock);
-	if (version && log_version(l, chunk) != *version) {
-		ret = -EAGAIN;	/* before anything reaches the file: a record written is a record replayed */
-		goto out;
+	ret = begin_turn(l);
+	/* before anything reaches the file: a record written is a record replayed */
+	if (!ret && version && log_version(l, h->chunk) != *version)
+		ret = -EAGAIN;
+	if (!ret) {
+		h->epoch = l->epoch;
+		ret = rec_write(l, h, data);
 	}
-	h.epoch = l->epoch;
-	ret = rec_write(l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
 	if (!ret)
-		ret = log_index(l, &h, l->nrec);
+		ret = log_index(l, h, l->nrec);
 	if (!ret)
 		l->nrec++;
-out:
+	end_turn(l);
 	pthread_mutex_unlock(&l->append_lock);
 	return ret;
 }
@@ -529,27 +588,23 @@ int log_append_zero(struct log *l, uint64_t chunk, uint64_t count)
 
 	if (!unused)
 		return -ENOMEM;
-	rec_seal(l, &h, unused);
-	pthread_mutex_lock(&l->append_lock);
-	h.epoch = l->epoch;
-	ret = rec_write(l, &h, unused);
-	if (!ret)
-		ret = log_index(l, &h, l->nrec);
-	if (!ret)
-		l->nrec++;
-	pthread_mutex_unlock(&l->append_lock);
+	ret = append(l, &h, unused, NULL);
 	free(unused);
 	return ret;
 }
 
 int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 {
-	return append(l, chunk, data, NULL);
+	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk };
+
+	return append(l, &h, data, NULL);
 }
 
 int log_append_if(struct log *l, uint64_t chunk, const uint8_t *data, uint64_t version)
 {
-	return append(l, chunk, data, &version);
+	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk };
+
+	return append(l, &h, data, &version);
 }
 
 int log_snapshot(struct log *l)
@@ -557,7 +612,10 @@ int log_snapshot(struct log *l)
 	int ret;
 
 	pthread_mutex_lock(&l->append_lock);
-	ret = ckpt_write(l, true);	/* the checkpoint is the snapshot */
+	ret = begin_turn(l);
+	if (!ret)
+		ret = ckpt_write(l, true);	/* the checkpoint is the snapshot */
+	end_turn(l);
 	pthread_mutex_unlock(&l->append_lock);
 	return ret;
 }
@@ -591,4 +649,3 @@ int log_read(struct log *l, uint64_t chunk, uint8_t *buf, uint32_t within, uint3
 
 uint64_t log_chunks(const struct log *l)	{ return l->mapped; }
 uint64_t log_epoch(const struct log *l)		{ return l->epoch; }
-int log_fd(const struct log *l)			{ return l->fd; }

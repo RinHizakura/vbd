@@ -7,7 +7,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <unistd.h>
 
 #include <urcu.h>
@@ -30,9 +29,7 @@ struct cache {
 	int err;		/* why the base is unreachable, 0 when it is open */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
 	uint8_t *manifest;		/* sha256 of each base chunk, or NULL: fetches are not checked */
-	struct log log;		/* base chunks fetched so far */
-	bool has_file;		/* log is open on the cache file */
-	pthread_mutex_t file_lock;	/* one thread of ours at the cache file at a time */
+	struct log log;		/* base chunks fetched so far; shared with the volume's other opens */
 	struct xarray fetching;	/* chunks being fetched from the base right now */
 	pthread_mutex_t fetch_lock;	/* guards fetching and the pf_ fields */
 	pthread_cond_t fetch_done;	/* a fetch finished, fetching may have changed */
@@ -57,29 +54,6 @@ static char *side_path(const char *log_path, const char *suffix)
 	if (p)
 		strcat(strcpy(p, log_path), suffix);
 	return p;
-}
-
-/*
- * Get the cache file to ourselves and see what is in it. Other opens of
- * it, a view in another process say, store what they fetch there too: the
- * file lock keeps them out, and the log then reads in what they added
- * since we last had it. Until release, the log's map is the file.
- *
- * Returns 0 or -errno; the file is held either way, release it.
- */
-static int acquire(struct cache *c)
-{
-	pthread_mutex_lock(&c->file_lock);
-	while (flock(log_fd(&c->log), LOCK_EX))
-		if (errno != EINTR)
-			return -errno;
-	return log_catch_up(&c->log);
-}
-
-static void release(struct cache *c)
-{
-	flock(log_fd(&c->log), LOCK_UN);
-	pthread_mutex_unlock(&c->file_lock);
 }
 
 int cache_create(const char *log_path, const struct super *sb, const uint8_t *manifest)
@@ -159,7 +133,6 @@ struct cache *cache_open(const char *log_path, const struct super *sb)
 	c->chunk_size = sb->chunk_size;
 	log_init(&c->log);
 	xa_init(&c->fetching);
-	pthread_mutex_init(&c->file_lock, NULL);
 	pthread_mutex_init(&c->fetch_lock, NULL);
 	pthread_cond_init(&c->fetch_done, NULL);
 	pthread_cond_init(&c->pf_wake, NULL);
@@ -178,16 +151,11 @@ struct cache *cache_open(const char *log_path, const struct super *sb)
 	}
 	if ((err = log_open(&c->log, path, mine)))
 		goto fail;
-	c->has_file = true;
 	if (memcmp(mine, sb, sizeof(*sb))) {
 		err = -EINVAL;	/* not this volume's cache */
 		goto fail;
 	}
-	/* as acquire, except that loading is the catching up */
-	while (flock(log_fd(&c->log), LOCK_EX) && errno == EINTR)
-		;
-	err = log_load(&c->log, sb->chunk_size, sb->size / sb->chunk_size, ALL_EPOCHS);
-	flock(log_fd(&c->log), LOCK_UN);
+	err = log_load(&c->log, sb->chunk_size, sb->size / sb->chunk_size, LOG_SHARED, 0);
 fail:
 	free(path);
 	free(mine);
@@ -210,16 +178,7 @@ void cache_close(struct cache *c)
 		pthread_mutex_unlock(&c->fetch_lock);
 		pthread_join(c->pf_thread, NULL);
 	}
-	/*
-	 * Closing may append a checkpoint, so the file has to be ours and the
-	 * log up to date with it. If it cannot catch up it will not checkpoint.
-	 */
-	if (c->has_file)
-		acquire(c);
-	log_close(&c->log);	/* and with the file goes its lock */
-	if (c->has_file)
-		pthread_mutex_unlock(&c->file_lock);
-	pthread_mutex_destroy(&c->file_lock);
+	log_close(&c->log);
 	xa_destroy(&c->fetching);
 	if (c->base)
 		c->ops->close(c->base);
@@ -247,12 +206,9 @@ static bool verified(const struct cache *c, uint64_t chunk, const uint8_t *data)
 /* Put a fetched chunk in the cache file, unless another open of it has by now. */
 static int store(struct cache *c, uint64_t chunk, const uint8_t *data)
 {
-	int ret = acquire(c);
+	int ret = log_append_if(&c->log, chunk, data, LOG_ABSENT);
 
-	if (!ret && !log_has(&c->log, chunk))
-		ret = log_append(&c->log, chunk, data);
-	release(c);
-	return ret;
+	return ret == -EAGAIN ? 0 : ret;
 }
 
 /*
@@ -284,10 +240,9 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 	if (ret)
 		return ret;
 
-	ret = acquire(c);
+	ret = log_refresh(&c->log);
 	if (!ret)
 		have = log_has(&c->log, chunk);
-	release(c);
 	if (ret || have)
 		;			/* failed, or someone else fetched it meanwhile */
 	else if (!c->base)

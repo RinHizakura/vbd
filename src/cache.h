@@ -18,9 +18,9 @@
  *
  * The cache file may be open in several processes at once, a volume's
  * writer and views of it: each stores what it fetches and finds what the
- * others stored, and the file holds every chunk once. They take turns at
- * the file under a file lock, held only while looking at it or adding to
- * it, never while fetching.
+ * others stored, and the file holds every chunk once. It is a shared log
+ * (LOG_SHARED in log.h): they take turns at the file, only while looking
+ * at it or adding to it, never while fetching.
  */
 #ifndef VBD_CACHE_H
 #define VBD_CACHE_H
