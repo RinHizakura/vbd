@@ -16,7 +16,6 @@
 
 #include "vbd.h"
 /* the on-disk format, for the tests that look at or damage the files */
-#include "../src/ckpt.h"
 #include "../src/log.h"
 
 #define SIZE		(1u << 20)	/* 1 MiB volume */

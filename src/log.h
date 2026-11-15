@@ -12,15 +12,16 @@
  * newest record written for it.
  *
  * Every header is HDR_SIZE bytes and starts with magic and crc; the magic
- * says which kind the rest is. Two kinds: struct rec_hdr here, and the
- * checkpoint's in ckpt.c.
+ * says which kind the rest is. Two kinds: struct rec_hdr and struct
+ * ckpt_hdr.
  *
  * The super block in front belongs to whoever owns the log: log_open hands
  * it over as bytes and the owner says what geometry it describes.
  *
- * Now and then the log appends its own map to itself as a checkpoint
- * (ckpt.c), so that the next load can start from there instead of from
- * record 0. Callers do not see this: it happens inside load, sync and close.
+ * Now and then the log appends its own map to itself as a checkpoint, so
+ * that the next load can start from there instead of from record 0. The
+ * log stays one file, and append stays the only way it is written. Callers
+ * do not see this: it happens inside load, sync, snapshot and close.
  */
 #ifndef VBD_LOG_H
 #define VBD_LOG_H
@@ -52,10 +53,39 @@ struct rec_hdr {
 	uint8_t  pad[HDR_SIZE - 24];
 };
 
+/*
+ * Header of a checkpoint record. A checkpoint is the log's map, appended to
+ * the log as one or more consecutive records of this kind.
+ */
+struct ckpt_hdr {
+	uint32_t magic;		/* CKPT_MAGIC */
+	uint32_t crc;		/* crc32c of the data that follows */
+	uint64_t epoch;		/* no record it covers has a larger one */
+	uint32_t part;		/* this record is part @part ... */
+	uint32_t parts;		/* ... of @parts */
+	uint64_t count;		/* map entries in the data: (chunk, record) as two uint64_t */
+	/*
+	 * What records after it are stamped with: @epoch, or @epoch + 1 when
+	 * the checkpoint is a snapshot, the one numbered @epoch.
+	 */
+	uint64_t next_epoch;
+	uint8_t  pad[HDR_SIZE - 40];
+};
+_Static_assert(sizeof(struct rec_hdr) == HDR_SIZE && sizeof(struct ckpt_hdr) == HDR_SIZE,
+	       "record headers");
+
+/*
+ * Checkpoint once this many bytes of log would have to be replayed. Replay
+ * reads and checksums every byte: about 540 MiB/s from the page cache on
+ * the machine this was measured on, whatever the chunk size, so this bounds
+ * an open after a crash to roughly a tenth of a second there.
+ */
+#define CKPT_BYTES	(64u << 20)
+
 /* log_load's @upto for the whole log, as it is now */
 #define ALL_EPOCHS	UINT64_MAX
 
-/* What is in here is for log.c and ckpt.c; everyone else uses the functions. */
+/* What is in here is for log.c; everyone else uses the functions. */
 struct log {
 	int fd;
 	uint32_t chunk_size;	/* bytes of data in a record */
@@ -139,22 +169,5 @@ uint64_t log_chunks(const struct log *l);
 uint64_t log_epoch(const struct log *l);
 /* The open file, for a caller that locks it (see log_catch_up). */
 int log_fd(const struct log *l);
-
-/* For code that writes records of its own kind (ckpt.c). */
-/* Point @chunk at record @rec in the map. 0 or -errno. */
-int log_map(struct log *l, uint64_t chunk, uint64_t rec);
-uint64_t rec_off(const struct log *l, uint64_t rec);
-/*
- * Write a header of any kind and @data as record l->nrec, after putting
- * the data's crc in the header; append_lock held.
- */
-int rec_write(struct log *l, void *hdr, const void *data);
-/* Read the header of record @rec, of whatever kind, into HDR_SIZE bytes at @hdr. */
-int rec_read_hdr(struct log *l, uint64_t rec, void *hdr);
-/*
- * Read the data of record @rec, whose header is @hdr. -EBADMSG if it is
- * not what the header's crc says: a record that was never written whole.
- */
-int rec_read_data(struct log *l, uint64_t rec, const void *hdr, void *data);
 
 #endif /* VBD_LOG_H */
