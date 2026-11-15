@@ -3,14 +3,21 @@
  * ublk front end: serve a volume as /dev/ublkbN.
  *
  * The kernel's ublk driver turns block requests into descriptors in a
- * buffer it shares with us by mmap, and signals each one as the completion
- * of an io_uring URING_CMD on /dev/ublkcN. We answer with vbd_read or
- * vbd_write on a per-tag bounce buffer and commit the result with another
- * URING_CMD, which also fetches the next request for that tag. Control
- * (add, params, start, stop, delete) goes the same way to /dev/ublk-control.
+ * buffer it shares with us by mmap, one array per queue, and signals each
+ * one as the completion of an io_uring URING_CMD on /dev/ublkcN. There is
+ * a queue per CPU, and each is one thread here with its own ring: it
+ * answers with vbd_read or vbd_write on a per-tag bounce buffer and commits
+ * the result with another URING_CMD, which also fetches the next request
+ * for that tag. A request is served by the queue of the CPU it was issued
+ * on, so requests from different CPUs do not wait for each other here.
+ * Control (add, params, start, stop, delete) goes the same way to
+ * /dev/ublk-control.
  *
- * ponytail: one queue, one thread, bounce buffers. Add queues when one core
- * cannot keep up, zero copy when the memcpy shows up in a profile.
+ * ponytail: bounce buffers, 64 of 256 KiB for every queue, touched only as
+ * tags come into use; zero copy or UBLK_F_USER_COPY when the memory or the
+ * memcpy shows. Queue threads are not pinned to their CPU, the driver does
+ * not ask for it; pin them (UBLK_U_CMD_GET_QUEUE_AFFINITY) if cache misses
+ * show.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -29,21 +36,33 @@
 #include "ublk_cmd.h"
 #include "ublk.h"
 
-#define DEPTH		64			/* requests in flight */
+#define DEPTH		64			/* requests in flight per queue */
 #define MAX_IO		(256u << 10)		/* bytes per request */
 #define CTRL_DEV	"/dev/ublk-control"
+
+struct srv;
+
+struct queue {
+	struct srv *s;
+	unsigned id;
+	pthread_t thread;
+	bool ring_ok;
+	struct io_uring ring;
+	struct ublksrv_io_desc *iod;		/* DEPTH descriptors, mapped from the driver */
+	uint8_t *buf;				/* DEPTH bounce buffers of MAX_IO */
+};
 
 struct srv {
 	struct vbd *v;
 	bool readonly;
 	int ctl, ch;				/* ublk-control, ublkcN */
 	int dev_id;				/* N, or -1 before ADD_DEV */
-	bool rings;				/* both rings initialised */
-	struct io_uring ctl_ring, io_ring;
-	struct ublksrv_io_desc *iod;		/* DEPTH descriptors, mapped from the driver */
-	size_t iod_bytes;
-	uint8_t *buf;				/* DEPTH bounce buffers of MAX_IO */
-	int hs[2];				/* handshake pipe, queue thread -> main */
+	bool ring_ok;
+	struct io_uring ctl_ring;
+	unsigned nq, started;			/* queues; queue threads created */
+	struct queue *q;
+	size_t iod_bytes;			/* one queue's descriptor array, in whole pages */
+	int hs[2];				/* handshake pipe, queue threads -> main */
 };
 
 static void prep_cmd(struct io_uring *ring, int fd, unsigned op,
@@ -80,7 +99,7 @@ static int ctrl(struct srv *s, unsigned op, struct ublksrv_ctrl_cmd *c)
 static int add_dev(struct srv *s)
 {
 	struct ublksrv_ctrl_dev_info info = {
-		.nr_hw_queues = 1, .queue_depth = DEPTH,
+		.nr_hw_queues = s->nq, .queue_depth = DEPTH,
 		.max_io_buf_bytes = MAX_IO, .dev_id = -1,
 	};
 	struct ublksrv_ctrl_cmd c = { .addr = (uintptr_t)&info, .len = sizeof(info) };
@@ -88,7 +107,8 @@ static int add_dev(struct srv *s)
 
 	if (ret < 0)
 		return ret;
-	s->dev_id = info.dev_id;		/* filled in by the driver */
+	s->dev_id = info.dev_id;		/* filled in by the driver ... */
+	s->nq = info.nr_hw_queues;		/* ... which may also grant fewer queues */
 	return 0;
 }
 
@@ -140,127 +160,143 @@ static int setup(struct srv *s)
 		return -errno;
 	if ((ret = io_uring_queue_init(4, &s->ctl_ring, IORING_SETUP_SQE128)))
 		return ret;
-	if ((ret = io_uring_queue_init(DEPTH, &s->io_ring, IORING_SETUP_SQE128))) {
-		io_uring_queue_exit(&s->ctl_ring);
-		return ret;
-	}
-	s->rings = true;
+	s->ring_ok = true;
+	s->nq = sysconf(_SC_NPROCESSORS_ONLN);
 	if ((ret = add_dev(s)) < 0 || (ret = set_params(s)) < 0 ||
 	    (ret = open_char_dev(s)))
 		return ret;
 
-	s->iod_bytes = (DEPTH * sizeof(*s->iod) + page - 1) / page * page;
-	s->iod = mmap(NULL, s->iod_bytes, PROT_READ, MAP_SHARED, s->ch,
-		      UBLKSRV_CMD_BUF_OFFSET);	/* queue 0 */
-	if (s->iod == MAP_FAILED) {
-		s->iod = NULL;
-		return -errno;
-	}
-	s->buf = malloc((size_t)DEPTH * MAX_IO);
-	if (!s->buf || pipe(s->hs))
+	s->iod_bytes = (DEPTH * sizeof(struct ublksrv_io_desc) + page - 1) / page * page;
+	s->q = calloc(s->nq, sizeof(*s->q));
+	if (!s->q || pipe(s->hs))
 		return -errno;
 	return 0;
 }
 
 /* Undo setup in reverse. STOP_DEV first: it aborts the pending fetches, which
- * ends the queue thread; DEL_DEV last: it waits for ublkcN to be closed. */
-static void teardown(struct srv *s, pthread_t *queue)
+ * ends the queue threads; DEL_DEV last: it waits for ublkcN to be closed. */
+static void teardown(struct srv *s)
 {
 	struct ublksrv_ctrl_cmd c = {};
 
 	if (s->dev_id >= 0)
 		ctrl(s, UBLK_U_CMD_STOP_DEV, &c);
-	if (queue)
-		pthread_join(*queue, NULL);
-	if (s->iod)
-		munmap(s->iod, s->iod_bytes);
+	for (unsigned i = 0; i < s->started; i++)
+		pthread_join(s->q[i].thread, NULL);
+	free(s->q);
 	if (s->ch >= 0)
 		close(s->ch);
 	if (s->dev_id >= 0)
 		ctrl(s, UBLK_U_CMD_DEL_DEV, &c);
-	free(s->buf);
 	if (s->hs[0] >= 0) {
 		close(s->hs[0]);
 		close(s->hs[1]);
 	}
-	if (s->rings) {
-		io_uring_queue_exit(&s->io_ring);
+	if (s->ring_ok)
 		io_uring_queue_exit(&s->ctl_ring);
-	}
 	if (s->ctl >= 0)
 		close(s->ctl);
 }
 
-static void queue_cmd(struct srv *s, unsigned tag, unsigned op, int result)
+static void queue_cmd(struct queue *q, unsigned tag, unsigned op, int result)
 {
 	struct ublksrv_io_cmd c = {
-		.tag = tag, .result = result,
-		.addr = (uintptr_t)(s->buf + (size_t)tag * MAX_IO),
+		.q_id = q->id, .tag = tag, .result = result,
+		.addr = (uintptr_t)(q->buf + (size_t)tag * MAX_IO),
 	};
 
-	prep_cmd(&s->io_ring, s->ch, op, &c, sizeof(c), tag);
+	prep_cmd(&q->ring, q->s->ch, op, &c, sizeof(c), tag);
 }
 
 /* Serve the request the driver left for @tag; returns bytes or -errno. */
-static int do_io(struct srv *s, unsigned tag)
+static int do_io(struct queue *q, unsigned tag)
 {
-	const struct ublksrv_io_desc *d = &s->iod[tag];
-	uint8_t *buf = s->buf + (size_t)tag * MAX_IO;
+	const struct ublksrv_io_desc *d = &q->iod[tag];
+	uint8_t *buf = q->buf + (size_t)tag * MAX_IO;
+	struct vbd *v = q->s->v;
 	uint64_t off = d->start_sector << 9;
 	size_t len = (size_t)d->nr_sectors << 9;
 
 	switch (ublksrv_get_op(d)) {
-	case UBLK_IO_OP_READ:	return vbd_read(s->v, buf, len, off);
-	case UBLK_IO_OP_WRITE:	return vbd_write(s->v, buf, len, off);
-	case UBLK_IO_OP_FLUSH:	return vbd_flush(s->v);
+	case UBLK_IO_OP_READ:	return vbd_read(v, buf, len, off);
+	case UBLK_IO_OP_WRITE:	return vbd_write(v, buf, len, off);
+	case UBLK_IO_OP_FLUSH:	return vbd_flush(v);
 	default:		return -EOPNOTSUPP;
 	}
 }
 
+/* A queue's ring, its view of the driver's descriptors, its buffers, and a fetch for every tag. */
+static int queue_init(struct queue *q)
+{
+	struct srv *s = q->s;
+	size_t page = sysconf(_SC_PAGESIZE);
+	/* the driver lays the queues' descriptor arrays out for the largest depth there is */
+	size_t stride = (UBLK_MAX_QUEUE_DEPTH * sizeof(*q->iod) + page - 1) / page * page;
+	int ret;
+
+	if ((ret = io_uring_queue_init(DEPTH, &q->ring, IORING_SETUP_SQE128)))
+		return ret;
+	q->ring_ok = true;
+	q->iod = mmap(NULL, s->iod_bytes, PROT_READ, MAP_SHARED, s->ch,
+		      UBLKSRV_CMD_BUF_OFFSET + q->id * stride);
+	if (q->iod == MAP_FAILED) {
+		q->iod = NULL;
+		return -errno;
+	}
+	q->buf = malloc((size_t)DEPTH * MAX_IO);
+	if (!q->buf)
+		return -ENOMEM;
+	for (unsigned tag = 0; tag < DEPTH; tag++)
+		queue_cmd(q, tag, UBLK_U_IO_FETCH_REQ, 0);
+	ret = io_uring_submit(&q->ring);
+	return ret == DEPTH ? 0 : ret < 0 ? ret : -EIO;
+}
+
 /*
- * The queue's daemon: the driver binds each tag to the thread that fetched
+ * A queue's daemon: the driver binds each tag to the thread that fetched
  * it, so every FETCH and COMMIT for the queue is issued from here. Ends when
  * every tag has been aborted, which STOP_DEV causes.
  */
 static void *queue_thread(void *arg)
 {
-	struct srv *s = arg;
+	struct queue *q = arg;
 	unsigned live = DEPTH;
 	int ret;
 
 	rcu_register_thread();
-	for (unsigned tag = 0; tag < DEPTH; tag++)
-		queue_cmd(s, tag, UBLK_U_IO_FETCH_REQ, 0);
-	ret = io_uring_submit(&s->io_ring);
-	ret = ret == DEPTH ? 0 : ret < 0 ? ret : -EIO;
-	if (write(s->hs[1], &ret, sizeof(ret)) != sizeof(ret) || ret)
-		goto out;
+	ret = queue_init(q);
+	if (write(q->s->hs[1], &ret, sizeof(ret)) != sizeof(ret) || ret)
+		live = 0;
 
 	while (live) {
 		struct io_uring_cqe *cqe;
 		unsigned head, n = 0;
 
-		ret = io_uring_submit_and_wait(&s->io_ring, 1);
+		ret = io_uring_submit_and_wait(&q->ring, 1);
 		if (ret == -EINTR)
 			continue;
 		if (ret < 0)
 			break;
-		io_uring_for_each_cqe(&s->io_ring, head, cqe) {
+		io_uring_for_each_cqe(&q->ring, head, cqe) {
 			unsigned tag = cqe->user_data;
 
 			n++;
 			if (cqe->res != UBLK_IO_RES_OK) {	/* tag retired */
 				if (cqe->res != UBLK_IO_RES_ABORT)
-					fprintf(stderr, "vbd serve: tag %u: %s\n",
-						tag, strerror(-cqe->res));
+					fprintf(stderr, "vbd serve: queue %u tag %u: %s\n",
+						q->id, tag, strerror(-cqe->res));
 				live--;
 				continue;
 			}
-			queue_cmd(s, tag, UBLK_U_IO_COMMIT_AND_FETCH_REQ, do_io(s, tag));
+			queue_cmd(q, tag, UBLK_U_IO_COMMIT_AND_FETCH_REQ, do_io(q, tag));
 		}
-		io_uring_cq_advance(&s->io_ring, n);
+		io_uring_cq_advance(&q->ring, n);
 	}
-out:
+	free(q->buf);
+	if (q->iod)
+		munmap(q->iod, q->s->iod_bytes);
+	if (q->ring_ok)
+		io_uring_queue_exit(&q->ring);
 	rcu_unregister_thread();
 	return NULL;
 }
@@ -270,9 +306,8 @@ int ublk_serve(struct vbd *v, bool readonly)
 	struct srv s = { .v = v, .readonly = readonly, .ctl = -1, .ch = -1,
 			 .dev_id = -1, .hs = { -1, -1 } };
 	struct ublksrv_ctrl_cmd start = { .data[0] = getpid() };
-	pthread_t queue;
 	sigset_t set;
-	int ret, sig;
+	int ret, err, sig;
 
 	if (vbd_chunk_size(v) < 512)
 		return -EINVAL;		/* sectors must not split a chunk */
@@ -281,23 +316,32 @@ int ublk_serve(struct vbd *v, bool readonly)
 	sigaddset(&set, SIGTERM);
 	pthread_sigmask(SIG_BLOCK, &set, NULL);	/* for sigwait below; threads inherit */
 
-	if ((ret = setup(&s)) ||
-	    (ret = -pthread_create(&queue, NULL, queue_thread, &s))) {
-		teardown(&s, NULL);
-		return ret;
+	if ((ret = setup(&s)))
+		goto out;
+	for (; s.started < s.nq; s.started++) {
+		struct queue *q = &s.q[s.started];
+
+		q->s = &s;
+		q->id = s.started;
+		if ((ret = -pthread_create(&q->thread, NULL, queue_thread, q)))
+			break;
 	}
-	if (read(s.hs[0], &ret, sizeof(ret)) != sizeof(ret))
-		ret = -EIO;
-	if (!ret)	/* the driver waits here until every tag has been fetched */
+	for (unsigned i = 0; i < s.started; i++) {	/* every queue reports how its start went */
+		if (read(s.hs[0], &err, sizeof(err)) != sizeof(err))
+			err = -EIO;
+		if (err && !ret)
+			ret = err;
+	}
+	if (!ret)	/* the driver waits here until every tag of every queue has been fetched */
 		ret = ctrl(&s, UBLK_U_CMD_START_DEV, &start);
-	if (ret < 0) {
-		teardown(&s, &queue);
-		return ret;
-	}
+	if (ret < 0)
+		goto out;
 
 	printf("/dev/ublkb%d\n", s.dev_id);
 	fflush(stdout);
 	sigwait(&set, &sig);
-	teardown(&s, &queue);
-	return 0;
+	ret = 0;
+out:
+	teardown(&s);
+	return ret;
 }

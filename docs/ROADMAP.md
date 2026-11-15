@@ -134,18 +134,23 @@ Done:
 Done:
 
 - `vbd serve` (`src/ublk/server.c`, ~300 lines on liburing, no ublksrv):
-  one queue, one thread, 64 tags, 256 KiB bounce buffer per tag. READ and
+  64 tags a queue, a 256 KiB bounce buffer per tag. READ and
   WRITE map to `vbd_read` / `vbd_write`, FLUSH to `vbd_flush`; the device
   advertises a volatile cache so flushes arrive. A volume opened at a
   snapshot is served read-only. SIGINT or SIGTERM stops and deletes the
   device.
+- One queue per CPU, each a thread with its own ring, descriptor array and
+  buffers; the engine underneath takes calls from all of them at once.
+  That is 16 MiB of bounce buffers per queue, 320 MiB on 20 CPUs, though
+  touched only as tags come into use; `UBLK_F_USER_COPY` below is what
+  brings it down.
 - `tests/ublk_test.sh`: dd through the device, read-only snapshot device,
+  four writers on different CPUs filling the same chunks piecemeal,
   mkfs.ext4 + mount + fsck across a server restart. Skipped without
   `sudo -n` or `/dev/ublk-control`.
 
 Remaining:
 
-- one queue per CPU, each with its own thread and ring
 - zero copy or `UBLK_F_USER_COPY` instead of bounce buffers
 - DISCARD and WRITE_ZEROES (a zero record, or a hole in the map)
 - `UBLK_F_USER_RECOVERY`: survive a server restart without unmounting

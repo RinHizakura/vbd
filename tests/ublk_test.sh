@@ -1,6 +1,7 @@
 #!/bin/sh
 # Serve a volume as a ublk block device and use it through the kernel: raw
-# reads and writes with dd, a read-only snapshot device, an ext4 filesystem
+# reads and writes with dd, a read-only snapshot device, writers on several
+# CPUs at once, an ext4 filesystem
 # that survives a server restart, and an ext4 image fetched over HTTP of
 # which a check and a mount download only a small part. Needs sudo without
 # a password and the ublk_drv module; skipped otherwise.
@@ -63,6 +64,34 @@ serve t.log 0
 [ "$(sudo -n blockdev --getro "$dev")" -eq 1 ] || fail "snapshot device should be read-only"
 sudo -n dd if="$dev" bs=1M count=4 status=none | cmp -s - expect.img || fail "snapshot content through the device"
 stop
+
+# one queue per CPU; four writers on different CPUs each fill every fourth
+# 4 KiB block of the same 2 MiB, so every 64 KiB chunk is written piecemeal
+# by all four at once, and each block must end up as its writer left it
+serve t.log
+[ "$(ls "/sys/block/${dev#/dev/}/mq" | wc -l)" -eq "$(nproc)" ] || fail "queues: want one per CPU"
+: > mixed.img
+for w in 0 1 2 3; do
+	head -c 4096 /dev/zero | tr '\0' "$w" > "blk$w"
+done
+i=0; while [ $i -lt 512 ]; do cat "blk$((i % 4))" >> mixed.img; i=$((i + 1)); done
+writers=""
+for w in 0 1 2 3; do
+	sudo -n taskset -c $((w % $(nproc))) sh -c "
+		i=$w
+		while [ \$i -lt 512 ]; do
+			dd if=blk$w of=$dev bs=4k seek=\$i oflag=direct conv=notrunc status=none || exit 1
+			i=\$((i + 4))
+		done" &
+	writers="$writers $!"
+done
+for w in $writers; do	# these four only: a bare wait would wait for the server too
+	wait "$w" || fail "a writer failed"
+done
+sudo -n dd if="$dev" bs=4k count=512 iflag=direct status=none | cmp -s - mixed.img ||
+	fail "writes from several CPUs into the same chunks"
+stop
+"$VBD" read t.log 0 2M | cmp -s - mixed.img || fail "the same after the server stopped"
 
 # a filesystem on top, written, then checked and read back after a restart
 if command -v mkfs.ext4 > /dev/null; then

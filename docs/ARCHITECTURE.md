@@ -56,8 +56,8 @@ What is built today, drawn as blocks.
 
 Everything below `include/vbd.h` is the engine. Everything above it is a
 consumer: the CLI, the tests and the ublk server. The engine has no
-knowledge of what sits above it; the server is one queue thread that turns
-block requests into vbd_read and vbd_write calls.
+knowledge of what sits above it; the server is a queue thread per CPU, each
+turning block requests into vbd_read and vbd_write calls.
 
 Inside the engine an arrow points from the file that calls to the file
 that is called. Nothing calls upwards, and two files with no arrow between
@@ -120,8 +120,8 @@ them do not know about each other.
 
 ## The ublk front end
 
-`vbd serve` is one process with two threads, talking to the kernel's ublk
-driver through three device nodes. Every arrow is an io_uring `URING_CMD`:
+`vbd serve` is one process with a main thread and a queue thread for every
+CPU, talking to the kernel's ublk driver through three device nodes. Every arrow is an io_uring `URING_CMD`:
 io_uring carries messages here, not data; the data moves by `copy_to_user`
 and `copy_from_user` into buffers the server owns.
 
@@ -134,8 +134,8 @@ and `copy_from_user` into buffers the server owns.
  |  START_DEV ... sigwait ...  |            |  stop, delete device N    |
  |  STOP_DEV, DEL_DEV          |            +-------------+-------------+
  +-----------------------------+                          | creates
- |  queue thread               |  URING_CMD |  /dev/ublkcN  (char)      |
- |  io_ring  ------------------+----------->|  the server's side of N:  |
+ |  queue thread, one per CPU  |  URING_CMD |  /dev/ublkcN  (char)      |
+ |  ring  ---------------------+----------->|  the server's side of N:  |
  |  FETCH, COMMIT_AND_FETCH    |            |  one command parked per   |
  |  iod[64]  <-- mmap ---------+------------+  tag, iod[tag] describes  |
  |  buf[64]  <-- copy to/from -+------------+  the request for that tag |
@@ -149,22 +149,28 @@ and `copy_from_user` into buffers the server owns.
  +-----------------------------+            +---------------------------+
 ```
 
+The device has one queue per CPU. Each queue is a thread here with a ring,
+a descriptor array and 64 bounce buffers of its own, so nothing is shared
+between queues but the volume, and a request issued on one CPU does not
+wait behind one issued on another.
+
 One request, by tag:
 
-1. At start the queue thread parks a `FETCH_REQ` for each of the 64 tags on
-   `/dev/ublkcN`. `START_DEV` returns once all are parked, and `/dev/ublkbN`
-   appears.
-2. Someone reads or writes `/dev/ublkbN`. The block layer forms a request;
-   the driver takes a free tag, writes op, sector and length into
-   `iod[tag]`, copies the data into `buf[tag]` for a write, and completes
-   the parked command. The queue thread sees a CQE carrying the tag.
+1. At start each queue thread parks a `FETCH_REQ` for each of its 64 tags
+   on `/dev/ublkcN`. `START_DEV` returns once all of them are parked, and
+   `/dev/ublkbN` appears.
+2. Someone reads or writes `/dev/ublkbN`. The block layer forms a request
+   on the queue of the CPU it runs on; the driver takes a free tag of that
+   queue, writes op, sector and length into its `iod[tag]`, copies the
+   data into `buf[tag]` for a write, and completes the parked command. That
+   queue's thread sees a CQE carrying the tag.
 3. The thread reads `iod[tag]` and calls `vbd_read`, `vbd_write` or
    `vbd_flush` on `buf[tag]`.
 4. It sends `COMMIT_AND_FETCH_REQ` with the tag and the result. The driver
    copies `buf[tag]` out for a read, ends the block request, and parks the
    command again for the next one.
 5. On SIGINT or SIGTERM the main thread sends `STOP_DEV`: every parked
-   command completes with an abort, the queue thread exits, the server
+   command completes with an abort, the queue threads exit, the server
    closes `/dev/ublkcN`, and `DEL_DEV` removes both nodes.
 
 ## On-disk format
