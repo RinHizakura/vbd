@@ -456,32 +456,11 @@ static void end_turn(struct log *l)
 		flock(l->fd, LOCK_UN);
 }
 
-int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks,
-	     enum log_as as, uint64_t arg)
+/* Load @l, whose geometry and kind are set. */
+static int load(struct log *l)
 {
-	int ret;
+	int ret = file_lock(l);	/* loading is a turn too */
 
-	l->chunk_size = chunk_size;
-	l->nchunks = nchunks;
-	l->upto = ALL_EPOCHS;
-	switch (as) {
-	case LOG_WRITER:
-		if (flock(l->fd, LOCK_EX | LOCK_NB))	/* held until close */
-			return errno == EWOULDBLOCK ? -EBUSY : -errno;
-		break;
-	case LOG_SHARED:
-		l->shared = true;
-		break;
-	case LOG_BEFORE:
-		if ((ret = snapshot_before(l, arg, &arg)))
-			return ret;
-		/* fall through */
-	case LOG_AT:
-		if (arg == ALL_EPOCHS)
-			return -ENOENT;
-		l->upto = arg;
-	}
-	ret = file_lock(l);	/* loading is a turn too */
 	if (!ret)
 		ret = ckpt_load(l) ? 0 : log_replay(l);
 	end_turn(l);
@@ -489,6 +468,47 @@ int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks,
 	if (!ret && l->upto != ALL_EPOCHS && l->upto >= l->epoch)
 		ret = -ENOENT;	/* snapshots so far are 0 .. epoch - 1 */
 	return ret;
+}
+
+static void set_geometry(struct log *l, uint32_t chunk_size, uint64_t nchunks)
+{
+	l->chunk_size = chunk_size;
+	l->nchunks = nchunks;
+	l->upto = ALL_EPOCHS;
+}
+
+int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks)
+{
+	set_geometry(l, chunk_size, nchunks);
+	if (flock(l->fd, LOCK_EX | LOCK_NB))	/* held until close */
+		return errno == EWOULDBLOCK ? -EBUSY : -errno;
+	return load(l);
+}
+
+int log_load_shared(struct log *l, uint32_t chunk_size, uint64_t nchunks)
+{
+	set_geometry(l, chunk_size, nchunks);
+	l->shared = true;
+	return load(l);
+}
+
+int log_load_at(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t snapshot)
+{
+	set_geometry(l, chunk_size, nchunks);
+	if (snapshot == ALL_EPOCHS)
+		return -ENOENT;
+	l->upto = snapshot;
+	return load(l);
+}
+
+int log_load_before(struct log *l, uint32_t chunk_size, uint64_t nchunks, int64_t when)
+{
+	uint64_t snapshot = 0;
+	int ret;
+
+	set_geometry(l, chunk_size, nchunks);
+	ret = snapshot_before(l, when, &snapshot);
+	return ret ? ret : log_load_at(l, chunk_size, nchunks, snapshot);
 }
 
 uint64_t log_at(const struct log *l)	{ return l->upto; }

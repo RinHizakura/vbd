@@ -155,7 +155,7 @@ struct cache *cache_open(const char *log_path, const struct super *sb)
 		err = -EINVAL;	/* not this volume's cache */
 		goto fail;
 	}
-	err = log_load(&c->log, sb->chunk_size, sb->size / sb->chunk_size, LOG_SHARED, 0);
+	err = log_load_shared(&c->log, sb->chunk_size, sb->size / sb->chunk_size);
 fail:
 	free(path);
 	free(mine);

@@ -92,8 +92,11 @@ int vbd_fork(const char *parent_path, uint64_t snapshot, const char *log_path)
 	return log_create(log_path, &sb);
 }
 
-/* Open the volume with its data log loaded as @as, @arg (see log_load). */
-static struct vbd *open_volume(const char *log_path, enum log_as as, uint64_t arg)
+/*
+ * Open the volume at @log_path, all but loading its data log: the caller
+ * does that, in the way it wants the volume, and hands the result to loaded.
+ */
+static struct vbd *open_volume(const char *log_path)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
 	struct super sb;
@@ -130,9 +133,6 @@ static struct vbd *open_volume(const char *log_path, enum log_as as, uint64_t ar
 			goto fail;
 		}
 	}
-	/* -EBUSY: someone else is writing it; -ENOENT: no such snapshot */
-	if ((err = log_load(&v->data, sb.chunk_size, sb.size / sb.chunk_size, as, arg)))
-		goto fail;
 	return v;
 fail:
 	vbd_close(v);
@@ -140,19 +140,38 @@ fail:
 	return NULL;
 }
 
+/* The end of an open: @err is what loading the data log of @v gave. */
+static struct vbd *loaded(struct vbd *v, int err)
+{
+	if (!err)
+		return v;
+	vbd_close(v);
+	errno = -err;
+	return NULL;
+}
+
 struct vbd *vbd_open(const char *log_path)
 {
-	return open_volume(log_path, LOG_WRITER, 0);
+	struct vbd *v = open_volume(log_path);
+
+	/* -EBUSY: someone else is writing it */
+	return v ? loaded(v, log_load(&v->data, v->chunk_size, v->size / v->chunk_size)) : NULL;
 }
 
 struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 {
-	return open_volume(log_path, LOG_AT, snapshot);
+	struct vbd *v = open_volume(log_path);
+
+	return v ? loaded(v, log_load_at(&v->data, v->chunk_size, v->size / v->chunk_size,
+					 snapshot)) : NULL;
 }
 
 struct vbd *vbd_open_before(const char *log_path, int64_t when)
 {
-	return open_volume(log_path, LOG_BEFORE, when);
+	struct vbd *v = open_volume(log_path);
+
+	return v ? loaded(v, log_load_before(&v->data, v->chunk_size, v->size / v->chunk_size,
+					     when)) : NULL;
 }
 
 void vbd_close(struct vbd *v)

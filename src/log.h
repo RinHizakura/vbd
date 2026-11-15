@@ -92,42 +92,13 @@ _Static_assert(sizeof(struct rec_hdr) == HDR_SIZE && sizeof(struct ckpt_hdr) == 
 /* What log_at says of a log that is not a view: the whole log, as it is now. */
 #define ALL_EPOCHS	UINT64_MAX
 
-/* What a log is loaded as. */
-enum log_as {
-	/*
-	 * To be appended to by this open alone. -EBUSY if another open of the
-	 * same file, in this process or any other, is the writer already; it
-	 * stays the writer until it closes.
-	 */
-	LOG_WRITER,
-	/*
-	 * To be appended to by several opens, in any number of processes, that
-	 * take turns at the file. Each has its turn inside load, an append,
-	 * log_refresh and close, and reads in there what the others appended;
-	 * between turns it knows the file as it was at its last one.
-	 */
-	LOG_SHARED,
-	/*
-	 * A view of snapshot @arg: records with a larger epoch are left out of
-	 * the map, and the log must not be appended to. -ENOENT if there is no
-	 * such snapshot. A view never changes the file, torn tail included, so
-	 * it can be loaded while someone else is appending.
-	 */
-	LOG_AT,
-	/*
-	 * The same, of the newest snapshot taken at or before @arg, seconds
-	 * since 1970. -ENOENT if there is none.
-	 */
-	LOG_BEFORE,
-};
-
 /* What is in here is for log.c; everyone else uses the functions. */
 struct log {
 	int fd;
 	uint32_t chunk_size;	/* bytes of data in a record */
 	uint64_t nchunks;	/* chunks are numbered 0 .. nchunks - 1 */
 	uint64_t upto;		/* ALL_EPOCHS, or the last epoch this view of the log shows */
-	bool shared;		/* LOG_SHARED: flock the file for every turn at it */
+	bool shared;		/* log_load_shared: flock the file for every turn at it */
 	bool loaded;		/* log_load finished: the map describes the file */
 	uint64_t nrec;		/* records in the file; next append goes here */
 	uint64_t ckpt_nrec;	/* nrec right after the last checkpoint */
@@ -150,14 +121,38 @@ void log_init(struct log *l);
 int log_open(struct log *l, const char *path, void *super);
 
 /*
- * Build the map from the file, given the geometry the super block
- * describes, as what @as says; @arg is what LOG_AT and LOG_BEFORE ask for.
- * Later records override earlier ones. The first record that does not
- * verify marks a torn tail, and the file is truncated there, except by a
- * view.
+ * Load: build the map from the file, given the geometry the super block
+ * describes. Later records override earlier ones. One of four, by what the
+ * log is to be.
+ *
+ * To be appended to by this open alone. The first record that does not
+ * verify marks a torn tail, and the file is truncated there. -EBUSY if
+ * another open of the same file, in this process or any other, is the
+ * writer already; this one stays the writer until it closes.
  */
-int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks,
-	     enum log_as as, uint64_t arg);
+int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks);
+
+/*
+ * A shared log: to be appended to by several opens, in any number of
+ * processes, that take turns at the file. Each has its turn inside load, an
+ * append, log_refresh and close, and reads in there what the others
+ * appended; between turns it knows the file as it was at its last one.
+ */
+int log_load_shared(struct log *l, uint32_t chunk_size, uint64_t nchunks);
+
+/*
+ * A view of snapshot @snapshot: records with a larger epoch are left out of
+ * the map, and the log must not be appended to. -ENOENT if there is no such
+ * snapshot. A view never changes the file, torn tail included, so it can be
+ * loaded while someone else is appending.
+ */
+int log_load_at(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t snapshot);
+
+/*
+ * The same, of the newest snapshot taken at or before @when, seconds since
+ * 1970. -ENOENT if there is none.
+ */
+int log_load_before(struct log *l, uint32_t chunk_size, uint64_t nchunks, int64_t when);
 
 /* The snapshot a view shows, or ALL_EPOCHS. */
 uint64_t log_at(const struct log *l);

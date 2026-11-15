@@ -728,8 +728,8 @@ static void test_shared_log(void)
 	log_init(&a);
 	log_init(&b);
 	assert(log_open(&a, path, super) == 0 && log_open(&b, path, super) == 0);
-	assert(log_load(&a, CHUNK, 16, LOG_SHARED, 0) == 0);
-	assert(log_load(&b, CHUNK, 16, LOG_SHARED, 0) == 0);
+	assert(log_load_shared(&a, CHUNK, 16) == 0);
+	assert(log_load_shared(&b, CHUNK, 16) == 0);
 
 	fill_random(x, CHUNK); fill_random(y, CHUNK);
 	assert(log_append_if(&a, 3, x, LOG_ABSENT) == 0);
@@ -746,10 +746,10 @@ static void test_shared_log(void)
 
 	log_init(&a);					/* and a writer finds both */
 	assert(log_open(&a, path, super) == 0);
-	assert(log_load(&a, CHUNK, 16, LOG_WRITER, 0) == 0 && log_chunks(&a) == 2);
+	assert(log_load(&a, CHUNK, 16) == 0 && log_chunks(&a) == 2);
 	log_init(&b);
 	assert(log_open(&b, path, super) == 0);
-	assert(log_load(&b, CHUNK, 16, LOG_WRITER, 0) == -EBUSY);
+	assert(log_load(&b, CHUNK, 16) == -EBUSY);
 	log_close(&b);
 	log_close(&a);
 	unlink(path);
