@@ -180,10 +180,6 @@ Done:
   4 KiB record and random writes reach 98k IOPS at 4 jobs, while 1 MiB
   writes, now 256 appends each, fall to 375.
 
-Remaining:
-
-- boot a VM from the device
-
 ## Open questions
 
 - metadata durability ordering between log fsync and manifest update. The
