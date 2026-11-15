@@ -159,9 +159,30 @@ Done:
   mkfs.ext4 + mount + fsck across a server restart. Skipped without
   `sudo -n` or `/dev/ublk-control`.
 
+- `tests/bench.sh` (`make bench`): fio on the served device and on a loop
+  device over a copy of the same image. On a 20-CPU WSL2 guest, 64 KiB
+  chunks, 3 s runs, IOPS at 1 / 4 / 16 fio jobs of depth 32:
+
+  ```
+               ublk, jobs:    1       4      16     loop, 4 jobs
+  randread  4k            139k    775k    906k            276k
+  randwrite 4k            5.4k   16.4k   14.3k            234k
+  read      1M            3.7k   13.4k   17.5k            7.0k
+  write     1M             380     779     878            7.3k
+  ```
+
+  Reads scale with the queues. Writes stop at about 14 thousand records a
+  second, some 900 MiB/s of log, whether as 4 KiB writes that each rewrite
+  a 64 KiB chunk or as 1 MiB writes of 16 chunks each. The server uses
+  three CPUs at that point (two in user mode, mostly the checksum; one in
+  the kernel), and its other threads wait: every append goes through the
+  one end of the log, one at a time. With 4 KiB chunks a 4 KiB write is a
+  4 KiB record and random writes reach 98k IOPS at 4 jobs, while 1 MiB
+  writes, now 256 appends each, fall to 375.
+
 Remaining:
 
-- `fio` against a loop device over the same image; boot a VM from the device
+- boot a VM from the device
 
 ## Open questions
 

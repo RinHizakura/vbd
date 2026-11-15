@@ -48,6 +48,7 @@ The tests also use `busybox` for a local HTTP server, and `sudo -n` plus
 git submodule update --init
 make        # build/vbd, build/libvbd.a (and deps/libxarray)
 make test
+make bench  # fio on a served volume and on a loop device; needs fio and sudo -n
 make clean
 ```
 

@@ -17,7 +17,7 @@ LIB_OBJS = build/volume.o build/super.o build/cache.o build/log.o \
 BIN      = build/vbd
 BIN_OBJS = build/main.o build/ublk/server.o
 
-.PHONY: all test clean $(XARRAY_LIB) $(URING_LIB)
+.PHONY: all test bench clean $(XARRAY_LIB) $(URING_LIB)
 all: $(LIB) $(BIN)
 
 $(BIN): $(BIN_OBJS) $(LIB) $(XARRAY_LIB) $(URING_LIB)
@@ -50,6 +50,9 @@ test: build/volume_test $(BIN)
 	tests/crash_test.sh $(BIN)
 	tests/http_test.sh $(BIN)
 	tests/ublk_test.sh $(BIN)
+
+bench: $(BIN)
+	tests/bench.sh $(BIN)
 
 build:
 	mkdir -p $@
