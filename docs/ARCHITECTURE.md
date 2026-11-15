@@ -1,7 +1,6 @@
 # Architecture
 
-What is built today, drawn as blocks. Dotted boxes are optional: everything
-on the base side exists only when the volume was created with a base image.
+What is built today, drawn as blocks.
 
 ## Layers
 
@@ -19,33 +18,37 @@ on the base side exists only when the volume was created with a base image.
  |  libvbd                                               include/vbd.h  |
  |  vbd_create  vbd_open  vbd_close  vbd_read  vbd_write  vbd_flush     |
  +----------------------------------------------------------------------+
- |  engine              src/volume.c  super.c  cache.c  log.c  ckpt.c   |
+ |  engine                                                              |
  |                                                                      |
- |  always                         . . only if created with a base . .  |
- |  +---------------------------+  .                                 .  |
- |  |  data log                 |  .  +---------------------------+  .  |
- |  |  XArray: chunk -> rec no. |  .  |  base cache               |  .  |
- |  |  file: disk.log           |  .  |  XArray: chunk -> rec no. |  .  |
- |  +---------------------------+  .  |  file: disk.log.cache     |  .  |
- |                                 .  +-------------+-------------+  .  |
- |  a read looks in the data log,  .           miss | fetch          .  |
- |  then the base cache; with no   .                v                .  |
- |  base an unwritten chunk reads  .  +---------------------------+  .  |
- |  as zeros                       .  |  base_ops src/base/base.h |  .  |
- |                                 .  |  probe open read close    |  .  |
- |                                 .  +-----+---------------+-----+  .  |
- |                                 .        |    one of     |        .  |
- |                                 .  +-----+------+  +-----+------+ .  |
- |                                 .  | base/file.c|  | base/http.c| .  |
- |                                 .  | pread      |  | libcurl    | .  |
- |                                 .  +-----+------+  +-----+------+ .  |
- |                                 . . . . .|. . . . . . . .|. . . . .  |
- +------------------------------------------|---------------|-----------+
-                                            v               v
-                                      +-----------+   +-----------+
-                                      |  base.img |   |  https:// |
-                                      |  local    |   | Range GET |
-                                      +-----------+   +-----------+
+ |  +----------------------------------------------------------------+  |
+ |  |  src/volume.c                                                  |  |
+ |  |  a volume: cuts a byte range into chunks; a chunk is read from |  |
+ |  |  the data log or, if it was never written, from the base cache |  |
+ |  +-------+-------------------------+-----------------------+------+  |
+ |          |                         |                       |         |
+ |          v                         v                       v         |
+ |  +----------------+       +------------------+      +-------------+  |
+ |  |  src/log.c     |       |  src/cache.c     |      | src/super.c |  |
+ |  |  a record log: | <---- |  the base cache: | ---> | the super   |  |
+ |  |  records, map, |       |  fetch a chunk   |      | block: size |  |
+ |  |  replay,       |       |  once and keep   |      | of volume,  |  |
+ |  |  checkpoints,  |       |  it, work        |      | identity of |  |
+ |  |  snapshots     |       |  offline         |      | its base    |  |
+ |  +---+--------+---+       +--------+---------+      +------+------+  |
+ |      |        :                    |                       |         |
+ |      |        :                    v                       v         |
+ |      |        :           +------------------------------------+     |
+ |      |        :           |  src/base/      struct base_ops    |     |
+ |      |        :           |  probe  open  read  close          |     |
+ |      |        :           |  base.c picks  file.c  or  http.c  |     |
+ |      |        :           +---------+----------------+---------+     |
+ +------|--------:---------------------|----------------|---------------+
+        v        v                     v                v
+  +----------+ +----------------+   +-----------+  +-----------+
+  |disk.log  | |disk.log.cache  |   | base.img  |  | https://  |
+  |data log  | |fetched chunks  |   |   local   |  | Range GET |
+  +----------+ +----------------+   +-----------+  +-----------+
+               \__ only for a volume created with a base __/
 
  libraries: libxarray (deps/), liburcu, POSIX file I/O; libcurl is used by
  the http backend only.
@@ -56,12 +59,23 @@ consumer: the CLI, the tests and the ublk server. The engine has no
 knowledge of what sits above it; the server is one queue thread that turns
 block requests into vbd_read and vbd_write calls.
 
-Everything on the dotted side is the base cache (`src/cache.c`). The volume
-asks it for any chunk the data log does not have and gets the base's
-content, or zeros past the end of the base or when there is no base. The
-base is reached only from there, and only through `struct
-base_ops` (`src/base/base.h`). The backend is picked from the name given to
-`create`; the engine never knows which one it got, and never needs to.
+Inside the engine an arrow points from the file that calls to the file
+that is called. Nothing calls upwards, and two files with no arrow between
+them do not know about each other.
+
+- `volume.c` holds one log, the data log, and one base cache. Those two
+  are all it knows of files.
+- `cache.c` holds a second log, the chunks fetched so far, and a base
+  backend. A volume asks it for any chunk the data log does not have and
+  gets the base's content, or zeros past the end of the base or when
+  there is no base. It is the only file that reads from a base, and only
+  through `struct base_ops`; the backend is picked from the name given to
+  `create`.
+- `super.c` is used from both sides: `volume.c` writes and validates the
+  super block, `cache.c` reads from it what the base is.
+- `log.c` is the same code for both files on disk. It does not know what a
+  volume, a base or a super block is: the 4 KiB in front of its records
+  are bytes it hands to whoever opened it.
 
 ## A volume in memory and on disk
 
