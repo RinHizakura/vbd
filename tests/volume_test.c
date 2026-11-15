@@ -17,6 +17,7 @@
 #include "vbd.h"
 /* the on-disk format, for the tests that look at or damage the files */
 #include "../src/log.h"
+#include "../src/sha256.h"
 
 #define SIZE		(1u << 20)	/* 1 MiB volume */
 #define CHUNK		4096u
@@ -50,7 +51,7 @@ static struct vbd *setup(void)
 	assert(write(fd, ref, SIZE / 2) == SIZE / 2);
 	close(fd);
 	snprintf(log_path, sizeof(log_path), "%s.log", base_path);
-	assert(vbd_create(log_path, SIZE, CHUNK, base_path) == 0);
+	assert(vbd_create(log_path, SIZE, CHUNK, base_path, NULL) == 0);
 	v = vbd_open(log_path);
 	assert(v);
 	return v;
@@ -101,12 +102,12 @@ static void test_create_errors(void)
 {
 	struct vbd *v = setup();
 
-	assert(vbd_create(log_path, SIZE, CHUNK, base_path) == -EEXIST);
-	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 3000, NULL) == -EINVAL);
-	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 8, NULL) == -EINVAL);	/* under 16 */
-	assert(vbd_create("/tmp/vbd-bad.log", 0, CHUNK, NULL) == -EINVAL);	/* no chunks at all */
-	assert(vbd_create("/tmp/vbd-bad.log", SIZE + 1, CHUNK, NULL) == -EINVAL);
-	assert(vbd_create("/tmp/vbd-bad.log", SIZE, CHUNK, "/nonexistent") == -ENOENT);
+	assert(vbd_create(log_path, SIZE, CHUNK, base_path, NULL) == -EEXIST);
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 3000, NULL, NULL) == -EINVAL);
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE, 8, NULL, NULL) == -EINVAL);	/* under 16 */
+	assert(vbd_create("/tmp/vbd-bad.log", 0, CHUNK, NULL, NULL) == -EINVAL);	/* no chunks at all */
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE + 1, CHUNK, NULL, NULL) == -EINVAL);
+	assert(vbd_create("/tmp/vbd-bad.log", SIZE, CHUNK, "/nonexistent", NULL) == -ENOENT);
 	teardown(v);
 }
 
@@ -465,6 +466,66 @@ static void test_open_at(void)
  * (test_bad_record). What was appended after the checkpoint is replayed on
  * top of it, and a damaged checkpoint means a full replay.
  */
+/* Write a manifest of the base to <base>.sums, wrong for @bad_chunk (-1: for none). */
+static void write_sums(char *path, size_t path_len, int bad_chunk)
+{
+	uint8_t sum[SHA256_LEN];
+	FILE *f;
+
+	snprintf(path, path_len, "%s.sums", base_path);
+	f = fopen(path, "w");
+	assert(f);
+	for (size_t c = 0; c < SIZE / 2 / CHUNK; c++) {
+		sha256(ref + c * CHUNK, CHUNK, sum);
+		if ((int)c == bad_chunk)
+			sum[0] ^= 1;
+		assert(fwrite(sum, sizeof(sum), 1, f) == 1);
+	}
+	assert(fclose(f) == 0);
+}
+
+/*
+ * With a manifest, a chunk fetched from the base that does not match it is
+ * refused and stays out of the cache. The manifest kept with the volume is
+ * itself pinned by the super block.
+ */
+static void test_sums(void)
+{
+	static const uint8_t abc[SHA256_LEN] = {	/* sha256("abc"), FIPS 180-4 */
+		0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde,
+		0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+		0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad };
+	struct vbd *v = setup();
+	char sums[sizeof(base_path) + 8], kept[sizeof(log_path) + 8];
+	uint8_t sum[SHA256_LEN];
+
+	sha256("abc", 3, sum);
+	assert(memcmp(sum, abc, SHA256_LEN) == 0);
+
+	vbd_close(v);				/* setup's volume has no manifest: make one that has */
+	assert(system("rm -f /tmp/vbd-base-*.log /tmp/vbd-base-*.log.cache") == 0);
+	write_sums(sums, sizeof(sums), 3);	/* says something else about chunk 3 */
+	assert(vbd_create(log_path, SIZE, 2 * CHUNK, base_path, sums) == -EINVAL);	/* other chunk size */
+	assert(vbd_create(log_path, SIZE, CHUNK, NULL, sums) == -EINVAL);		/* of what base? */
+	assert(vbd_create(log_path, SIZE, CHUNK, base_path, sums) == 0);
+
+	v = vbd_open(log_path);
+	assert(v);
+	assert(vbd_read(v, buf, 3 * CHUNK, 0) == 3 * CHUNK);
+	assert(memcmp(buf, ref, 3 * CHUNK) == 0);
+	assert(vbd_read(v, buf, CHUNK, 3 * CHUNK) == -EIO);
+	assert(vbd_read(v, buf, CHUNK, 3 * CHUNK) == -EIO);	/* it was not cached */
+	assert(vbd_fetched(v) == 3);
+	assert(vbd_read(v, buf, CHUNK, 4 * CHUNK) == CHUNK);	/* the rest is unaffected */
+	assert(memcmp(buf, ref + 4 * CHUNK, CHUNK) == 0);
+	vbd_close(v);
+
+	snprintf(kept, sizeof(kept), "%s.sums", log_path);
+	flip_bit(kept, 3 * SHA256_LEN);		/* "repair" chunk 3 in the kept copy */
+	assert(vbd_open(log_path) == NULL && errno == EINVAL);
+	teardown(NULL);
+}
+
 /* One writer at a time; views of a snapshot are welcome beside it. */
 static void test_one_writer(void)
 {
@@ -603,7 +664,7 @@ static void test_checkpoint(void)
 
 	/* a map too big for one record is cut into parts: 768 entries, 256 in each */
 	snprintf(log_path, sizeof(log_path), "/tmp/vbd-base-big.log");
-	assert(vbd_create(log_path, BIG, CHUNK, NULL) == 0);
+	assert(vbd_create(log_path, BIG, CHUNK, NULL, NULL) == 0);
 	v = vbd_open(log_path);
 	assert(v);
 	memset(big_ref, 0, BIG);
@@ -656,7 +717,7 @@ static void test_cache_checkpoint(void)
 	assert(fclose(f) == 0);
 	snprintf(log_path, sizeof(log_path), "%s.log", big_base);
 	snprintf(cache_path, sizeof(cache_path), "%s.cache", log_path);
-	assert(vbd_create(log_path, (uint64_t)BIG_CHUNKS * CHUNK, CHUNK, big_base) == 0);
+	assert(vbd_create(log_path, (uint64_t)BIG_CHUNKS * CHUNK, CHUNK, big_base, NULL) == 0);
 
 	v = vbd_open(log_path);
 	assert(v);
@@ -707,6 +768,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
+	RUN(test_sums);
 	RUN(test_one_writer);
 	RUN(test_shared_cache);
 	RUN(test_view_keeps_tail);

@@ -1,20 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* The base cache: a log of fetched base chunks in front of a base backend. */
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <unistd.h>
 
 #include <xarray.h>
 
+#include "common.h"
 #include "cache.h"
 #include "log.h"
+#include "sha256.h"
 #include "super.h"
 #include "base/base.h"
 
 #define CACHE_SUFFIX	".cache"
+#define SUMS_SUFFIX	".sums"		/* the base's manifest, if the volume has one */
 
 struct cache {
 	uint32_t chunk_size;
@@ -22,6 +27,7 @@ struct cache {
 	void *base;		/* NULL while ops is set: base unreachable, offline */
 	int err;		/* why the base is unreachable, 0 when it is open */
 	uint64_t base_size;	/* bytes the base actually has; the rest reads as zeros */
+	uint8_t *sums;		/* sha256 of each base chunk, or NULL: fetches are not checked */
 	struct log log;		/* base chunks fetched so far */
 	bool has_file;		/* log is open on the cache file */
 	pthread_mutex_t file_lock;	/* one thread of ours at the cache file at a time */
@@ -33,12 +39,13 @@ struct cache {
 /* What cache.fetching holds for a chunk; only its presence matters. */
 #define FETCHING	xa_mk_value(1)
 
-static char *cache_path(const char *log_path)
+/* <log_path><suffix>; the caller frees it. */
+static char *side_path(const char *log_path, const char *suffix)
 {
-	char *p = malloc(strlen(log_path) + sizeof(CACHE_SUFFIX));
+	char *p = malloc(strlen(log_path) + strlen(suffix) + 1);
 
 	if (p)
-		strcat(strcpy(p, log_path), CACHE_SUFFIX);
+		strcat(strcpy(p, log_path), suffix);
 	return p;
 }
 
@@ -65,11 +72,44 @@ static void release(struct cache *c)
 	pthread_mutex_unlock(&c->file_lock);
 }
 
-int cache_create(const char *log_path, const struct super *sb)
+int cache_create(const char *log_path, const struct super *sb, const uint8_t *sums)
 {
-	char *path = cache_path(log_path);
-	int ret = path ? log_create(path, sb) : -ENOMEM;
+	char *path = side_path(log_path, CACHE_SUFFIX);
+	char *sums_path = side_path(log_path, SUMS_SUFFIX);
+	ssize_t len = super_sums_len(sb);
+	int fd, ret = -ENOMEM;
 
+	if (!path || !sums_path || (ret = log_create(path, sb)) || !sums)
+		goto out;
+	fd = open(sums_path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+	if (fd < 0) {
+		ret = -errno;
+	} else {
+		if (pwrite(fd, sums, len, 0) != len || fsync(fd))
+			ret = errno ? -errno : -EIO;
+		close(fd);
+		if (ret)
+			unlink(sums_path);
+	}
+	if (ret)
+		unlink(path);	/* no half-made cache left behind */
+out:
+	free(path);
+	free(sums_path);
+	return ret;
+}
+
+/* Load the manifest kept with the volume; it must be the one the super block pins. */
+static int load_sums(struct cache *c, const char *log_path, const struct super *sb)
+{
+	char *path = side_path(log_path, SUMS_SUFFIX);
+	int ret = -ENOMEM;
+
+	c->sums = malloc(super_sums_len(sb) + 1);
+	if (path && c->sums)
+		ret = read_exact(path, c->sums, super_sums_len(sb));
+	if (!ret && !super_check_sums(sb, c->sums))
+		ret = -EINVAL;
 	free(path);
 	return ret;
 }
@@ -117,7 +157,9 @@ struct cache *cache_open(const char *log_path, const struct super *sb)
 
 	if ((err = bind_base(c, sb)))
 		goto fail;
-	path = cache_path(log_path);
+	if (super_has_sums(sb) && (err = load_sums(c, log_path, sb)))
+		goto fail;
+	path = side_path(log_path, CACHE_SUFFIX);
 	mine = malloc(sizeof(*mine));
 	if (!path || !mine) {
 		err = -ENOMEM;
@@ -163,6 +205,7 @@ void cache_close(struct cache *c)
 	xa_destroy(&c->fetching);
 	if (c->base)
 		c->ops->close(c->base);
+	free(c->sums);
 	pthread_mutex_destroy(&c->fetch_lock);
 	pthread_cond_destroy(&c->fetch_done);
 	free(c);
@@ -170,6 +213,17 @@ void cache_close(struct cache *c)
 
 uint64_t cache_fetched(const struct cache *c)	{ return log_chunks(&c->log); }
 int cache_err(const struct cache *c)		{ return c->err; }
+
+/* Is @data what the manifest says @chunk of the base holds? True with no manifest. */
+static bool verified(const struct cache *c, uint64_t chunk, const uint8_t *data)
+{
+	uint8_t hash[SHA256_LEN];
+
+	if (!c->sums)
+		return true;
+	sha256(data, c->chunk_size, hash);
+	return !memcmp(hash, c->sums + chunk * SHA256_LEN, SHA256_LEN);
+}
 
 /* Put a fetched chunk in the cache file, unless another open of it has by now. */
 static int store(struct cache *c, uint64_t chunk, const uint8_t *data)
@@ -223,6 +277,8 @@ static int fetch(struct cache *c, uint64_t chunk, uint8_t *buf,
 		ret = -ENOMEM;
 	else
 		ret = c->ops->read(c->base, chunk * c->chunk_size, tmp, c->chunk_size);
+	if (!ret && tmp && !verified(c, chunk, tmp))
+		ret = -EIO;		/* not what the manifest promised: keep it out */
 	if (!ret && tmp)
 		ret = store(c, chunk, tmp);
 	if (!ret && tmp)

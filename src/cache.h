@@ -7,7 +7,9 @@
  * for a volume with no base.
  *
  * The base must not change. A base whose size or validator differs from
- * what the volume recorded is refused. One that cannot be reached at all
+ * what the volume recorded is refused. If the volume was created with a
+ * manifest of the base, every chunk fetched is also checked against it: one
+ * that does not match is not stored, and the read fails with -EIO. One that cannot be reached at all
  * leaves the cache open offline: chunks already fetched read normally, the
  * others fail with the error that reaching the base gave.
  *
@@ -30,9 +32,11 @@ struct super;
 
 /*
  * Create the cache file for the new volume at @log_path, whose sealed
- * super block is @sb. Only for a volume with a base.
+ * super block is @sb. Only for a volume with a base. @sums is the base's
+ * manifest if the volume has one (super_set_sums), else NULL; it is stored
+ * next to the cache file.
  */
-int cache_create(const char *log_path, const struct super *sb);
+int cache_create(const char *log_path, const struct super *sb, const uint8_t *sums);
 
 /*
  * Open the cache of the volume at @log_path, whose super block is @sb.

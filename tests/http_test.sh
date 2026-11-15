@@ -39,6 +39,19 @@ printf 'over http' | "$VBD" write t.log 70000
 { head -c 70000 www/base.img; printf 'over http'; tail -c +70010 www/base.img; } > expect.img
 "$VBD" read t.log 0 1M | cmp -s - expect.img || fail "read-modify-write"
 
+# a manifest catches content that changed behind an unchanged size and date
+"$VBD" sums www/base.img 64K > base.sums
+"$VBD" create s.log 2M 64K "$url" base.sums
+"$VBD" read s.log 0 64K > got.bin
+head -c 64K www/base.img | cmp -s - got.bin || fail "fetch through a manifest"
+cp -p www/base.img keep.img
+printf X | dd of=www/base.img bs=1 seek=100000 conv=notrunc status=none
+touch -r keep.img www/base.img
+"$VBD" read s.log 128K 64K > /dev/null || fail "an untouched chunk should still verify"
+expect 1 "$VBD" read s.log 64K 64K		# the chunk that holds byte 100000
+cp -p keep.img www/base.img
+"$VBD" read s.log 64K 64K > /dev/null || fail "the bad chunk was cached"
+
 # server down: the volume opens offline; cached chunks read, misses fail
 "$VBD" create v.log 2M 64K "http://127.0.0.1:$port/base.img"	# nothing cached
 kill "$httpd"; wait "$httpd" 2>/dev/null || true; httpd=""

@@ -169,13 +169,15 @@ One request, by tag:
 
 ```
  super block (4096 B, written once by create, never rewritten)
- +-------+-------+---------+------------+------+-----------+-----------+---------------+
- | crc   | magic | version | chunk_size | size | base_size | base_tag  | base path/URL |
- | u32   | u32   | u32     | u32        | u64  | u64       | char[128] | char[3936]    |
- +-------+-------+---------+------------+------+-----------+-----------+---------------+
-   ^       crc covers everything after itself       base_tag: the backend's validator at
+ +-----+-------+---------+------------+------+-----------+-----------+-----------+---------------+
+ | crc | magic | version | chunk_size | size | base_size | sums_hash | base_tag  | base path/URL |
+ | u32 | u32   | u32     | u32        | u64  | u64       | u8[32]    | char[128] | char[3904]    |
+ +-----+-------+---------+------------+------+-----------+-----------+-----------+---------------+
+   ^ crc covers everything after itself             base_tag: the backend's validator at
                                                     create (file mtime, or ETag / Last-Modified)
    base_size 0 and an empty base path/URL mean the volume has no base.
+   sums_hash: sha256 of the base's manifest, kept as disk.log.sums: one sha256
+   per base chunk. All zero when the volume was created without one.
 
  record (64 B header + chunk_size B data)
  +-------+-------+-------+-------+----------+------------------------------------+

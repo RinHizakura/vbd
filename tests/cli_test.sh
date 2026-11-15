@@ -50,6 +50,16 @@ expect 1 "$VBD" read t.log 0 1M 2                     # no such snapshot
 hello vbd
 EOT
 
+# sums: one sha256 per chunk; a volume created with them checks what it fetches
+"$VBD" sums base.img 4K > base.sums
+[ "$(stat -c %s base.sums)" -eq $((256 * 32)) ] || fail "manifest size"
+[ "$(head -c 32 base.sums | od -An -tx1 | tr -d ' \n')" = \
+  "$(head -c 4096 base.img | sha256sum | cut -d' ' -f1)" ] || fail "sums disagrees with sha256sum"
+"$VBD" create s.log 2M 4K base.img base.sums
+"$VBD" read s.log 0 1M | cmp -s - base.img || fail "read through a manifest"
+expect 1 "$VBD" create s2.log 2M 8K base.img base.sums	# made for another chunk size
+expect 1 "$VBD" create s2.log 2M 4K missing.sums	# a manifest of no base
+
 # two processes read views of one volume at the same time and share its
 # cache: both get the base, and the cache ends up holding each chunk once
 head -c 4M /dev/urandom > big.img

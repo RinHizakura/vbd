@@ -11,13 +11,14 @@
 
 #include <vbd.h>
 
+#include "sha256.h"
 #include "ublk/ublk.h"
 
 #define BUF_SIZE	(1 << 20)
 
 struct cmd {
 	const char *name, *args, *help;
-	int min, max;		/* how many arguments follow <log> */
+	int min, max;		/* how many arguments follow the first */
 	bool at;		/* the optional last one is a snapshot to open the volume at */
 	/* exactly one of the two: */
 	int (*make)(const char *log, char **args, int n);	/* works on the path */
@@ -29,9 +30,9 @@ static const struct cmd cmds[];
 
 static int usage(void)
 {
-	fputs("usage: vbd <command> <log> ...\n", stderr);
+	fputs("usage: vbd <command> ...\n", stderr);
 	for (const struct cmd *c = cmds; c->name; c++)
-		fprintf(stderr, "  %-8s <log> %-23s %s\n", c->name, c->args, c->help);
+		fprintf(stderr, "  %-8s %-36s %s\n", c->name, c->args, c->help);
 	return 2;
 }
 
@@ -62,11 +63,44 @@ static int cmd_create(const char *log, char **args, int n)
 	if (parse_size(args[0], &size) || parse_size(args[1], &chunk) ||
 	    chunk > UINT32_MAX)
 		return usage();
-	ret = vbd_create(log, size, chunk, n > 2 ? args[2] : NULL);
+	ret = vbd_create(log, size, chunk, n > 2 ? args[2] : NULL, n > 3 ? args[3] : NULL);
 	if (ret) {
 		fprintf(stderr, "vbd create: %s\n", strerror(-ret));
 		return 1;
 	}
+	return 0;
+}
+
+/*
+ * The manifest of an image: one sha256 per chunk, a short last chunk padded
+ * with zeros, which is how the engine reads it.
+ */
+static int cmd_sums(const char *image, char **args, int n)
+{
+	uint8_t *buf, sum[SHA256_LEN];
+	uint64_t chunk;
+	size_t got;
+	FILE *f;
+
+	if (parse_size(args[0], &chunk) || !chunk || chunk > UINT32_MAX)
+		return usage();
+	f = fopen(image, "r");
+	buf = malloc(chunk);
+	if (!f || !buf) {
+		fprintf(stderr, "vbd sums: %s: %s\n", image, strerror(errno));
+		return 1;
+	}
+	while ((got = fread(buf, 1, chunk, f)) > 0) {
+		memset(buf + got, 0, chunk - got);
+		sha256(buf, chunk, sum);
+		fwrite(sum, 1, sizeof(sum), stdout);
+	}
+	if (ferror(f) || fflush(stdout)) {
+		fprintf(stderr, "vbd sums: %s\n", strerror(errno));
+		return 1;
+	}
+	fclose(f);
+	free(buf);
 	return 0;
 }
 
@@ -164,21 +198,23 @@ out:
 }
 
 static const struct cmd cmds[] = {
-	{ "create", "<size> <chunk> [base]", "new volume; sizes take K, M, G suffixes",
-	  2, 3, .make = cmd_create },
-	{ "info", "[snapshot]", "print size, chunk size, epoch, chunks fetched, base state",
+	{ "create", "<log> <size> <chunk> [base [sums]]", "new volume; sizes take K, M, G suffixes",
+	  2, 4, .make = cmd_create },
+	{ "info", "<log> [snapshot]", "print size, chunk size, epoch, chunks fetched, base state",
 	  0, 1, .at = true, .run = cmd_info },
-	{ "read", "<off> <len> [snapshot]", "copy a range to stdout, as of a snapshot if given",
+	{ "read", "<log> <off> <len> [snapshot]", "copy a range to stdout, as of a snapshot if given",
 	  2, 3, .at = true, .run = cmd_read },
-	{ "write", "<off>", "copy stdin to the volume and flush",
+	{ "write", "<log> <off>", "copy stdin to the volume and flush",
 	  1, 1, .run = cmd_write },
-	{ "snapshot", "", "freeze the current content; prints the snapshot number",
+	{ "snapshot", "<log>", "freeze the current content; prints the snapshot number",
 	  0, 0, .run = cmd_snapshot },
-	{ "serve", "[snapshot]", "expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root",
+	{ "serve", "<log> [snapshot]", "expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root",
 	  0, 1, .at = true, .run = cmd_serve },
+	{ "sums", "<image> <chunk>", "write the manifest of a base image to stdout, for create's [sums]",
+	  1, 1, .make = cmd_sums },
 	{ NULL }
 };
-#define MAX_ARGS	3	/* the largest max above */
+#define MAX_ARGS	3	/* the largest max of a run command above */
 
 int main(int argc, char **argv)
 {

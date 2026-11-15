@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <errno.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "common.h"
@@ -50,6 +51,44 @@ int super_check_base(const struct super *sb)
 	if (ret)
 		return ret;
 	return size == sb->base_size && !strcmp(tag, sb->base_tag) ? 0 : -ESTALE;
+}
+
+size_t super_sums_len(const struct super *sb)
+{
+	return (sb->base_size + sb->chunk_size - 1) / sb->chunk_size * SHA256_LEN;
+}
+
+int super_set_sums(struct super *sb, const char *path, uint8_t **sums)
+{
+	size_t len = super_sums_len(sb);
+	int ret;
+
+	*sums = malloc(len + 1);
+	if (!*sums)
+		return -ENOMEM;
+	ret = read_exact(path, *sums, len);
+	if (ret) {
+		free(*sums);
+		*sums = NULL;
+		return ret;
+	}
+	sha256(*sums, len, sb->sums_hash);
+	return 0;
+}
+
+bool super_has_sums(const struct super *sb)
+{
+	static const uint8_t none[SHA256_LEN];
+
+	return memcmp(sb->sums_hash, none, SHA256_LEN) != 0;
+}
+
+bool super_check_sums(const struct super *sb, const uint8_t *sums)
+{
+	uint8_t hash[SHA256_LEN];
+
+	sha256(sums, super_sums_len(sb), hash);
+	return !memcmp(hash, sb->sums_hash, SHA256_LEN);
 }
 
 void super_seal(struct super *sb)

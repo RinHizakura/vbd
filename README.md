@@ -59,13 +59,14 @@ the server is not. The base must not change while volumes depend on it: a
 volume whose base was modified refuses to open.
 
 ```
-usage: vbd <command> <log> ...
-  create   <log> <size> <chunk> [base]   new volume; sizes take K, M, G suffixes
-  info     <log> [snapshot]              print size, chunk size, epoch, chunks fetched, base state
-  read     <log> <off> <len> [snapshot]  copy a range to stdout, as of a snapshot if given
-  write    <log> <off>                   copy stdin to the volume and flush
-  snapshot <log>                         freeze the current content; prints the snapshot number
-  serve    <log> [snapshot]              expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
+usage: vbd <command> ...
+  create   <log> <size> <chunk> [base [sums]]   new volume; sizes take K, M, G suffixes
+  info     <log> [snapshot]                     print size, chunk size, epoch, chunks fetched, base state
+  read     <log> <off> <len> [snapshot]         copy a range to stdout, as of a snapshot if given
+  write    <log> <off>                          copy stdin to the volume and flush
+  snapshot <log>                                freeze the current content; prints the snapshot number
+  serve    <log> [snapshot]                     expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
+  sums     <image> <chunk>                      write the manifest of a base image to stdout, for create's [sums]
 ```
 
 Sizes and offsets accept `K`, `M` and `G` suffixes. For example:
@@ -90,6 +91,15 @@ at that moment, 16 bytes per chunk written so far, rounded up to whole
 chunks: one chunk of log space for a small volume. Reading as of a
 snapshot never changes the volume, and does not get slower with how much
 was written before it.
+
+To be sure a base is what you expect, and stays that, give `create` a
+manifest of it: the sha256 of every chunk, made from a copy you trust. A
+chunk that arrives from the base and does not match is refused, not cached:
+
+```sh
+vbd sums ubuntu.img 64K > ubuntu.sums
+vbd create disk.log 1G 64K https://images.example/ubuntu.img ubuntu.sums
+```
 
 One process at a time can have a volume open for writing. While it is
 being served, `vbd info`, `vbd write`, `vbd snapshot` and a `vbd read`
