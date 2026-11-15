@@ -48,19 +48,26 @@ static int rec_read_data(struct log *l, uint64_t rec, const void *hdr, void *dat
 }
 
 /*
- * Write a header of any kind and @data as record l->nrec, after putting
- * the data's crc in the header. The caller holds l->append_lock.
+ * Put the crc of @data in the header that will go in front of it. Not part
+ * of rec_write, so that it can be done before taking l->append_lock: it
+ * reads every byte of the data, and the lock is held by one thread at a time.
  */
-static int rec_write(struct log *l, void *hdr, const void *data)
+static void rec_seal(const struct log *l, void *hdr, const void *data)
+{
+	((struct hdr_start *)hdr)->crc = crc32c(0, data, l->chunk_size);
+}
+
+/*
+ * Write a sealed header of any kind and @data as record l->nrec. The
+ * caller holds l->append_lock.
+ */
+static int rec_write(struct log *l, const void *hdr, const void *data)
 {
 	struct iovec iov[2] = {
-		{ .iov_base = hdr, .iov_len = HDR_SIZE },
+		{ .iov_base = (void *)hdr, .iov_len = HDR_SIZE },
 		{ .iov_base = (void *)data, .iov_len = l->chunk_size },
 	};
-	ssize_t n;
-
-	((struct hdr_start *)hdr)->crc = crc32c(0, data, l->chunk_size);
-	n = pwritev(l->fd, iov, 2, rec_off(l, l->nrec));
+	ssize_t n = pwritev(l->fd, iov, 2, rec_off(l, l->nrec));
 
 	if (n == (ssize_t)(HDR_SIZE + l->chunk_size))
 		return 0;
@@ -105,6 +112,7 @@ static int put_part(struct log *l, struct ckpt_hdr *h, uint64_t *ent)
 {
 	int ret;
 
+	rec_seal(l, h, ent);
 	ret = rec_write(l, h, ent);
 	if (ret)
 		return ret;
@@ -454,12 +462,25 @@ void log_close(struct log *l)
  * An open log.
  */
 
-int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
+uint64_t log_version(const struct log *l, uint64_t chunk)
+{
+	void *e = xa_load((struct xarray *)&l->map, chunk);
+
+	return e ? xa_to_value(e) : LOG_ABSENT;	/* a record number is used once */
+}
+
+/* Append @data for @chunk; with @version, only if that is still what the log holds. */
+static int append(struct log *l, uint64_t chunk, const uint8_t *data, const uint64_t *version)
 {
 	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk };
 	int ret;
 
+	rec_seal(l, &h, data);	/* the costly part, done before the lock */
 	pthread_mutex_lock(&l->append_lock);
+	if (version && log_version(l, chunk) != *version) {
+		ret = -EAGAIN;	/* before anything reaches the file: a record written is a record replayed */
+		goto out;
+	}
 	h.epoch = l->epoch;
 	ret = rec_write(l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
@@ -467,8 +488,19 @@ int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
 		ret = log_map(l, chunk, l->nrec);
 	if (!ret)
 		l->nrec++;
+out:
 	pthread_mutex_unlock(&l->append_lock);
 	return ret;
+}
+
+int log_append(struct log *l, uint64_t chunk, const uint8_t *data)
+{
+	return append(l, chunk, data, NULL);
+}
+
+int log_append_if(struct log *l, uint64_t chunk, const uint8_t *data, uint64_t version)
+{
+	return append(l, chunk, data, &version);
 }
 
 int log_snapshot(struct log *l)

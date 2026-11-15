@@ -157,6 +157,25 @@ void log_close(struct log *l);
 /* Append one whole chunk and publish it in the map. */
 int log_append(struct log *l, uint64_t chunk, const uint8_t *data);
 
+/* What log_version says of a chunk the log does not hold. */
+#define LOG_ABSENT	UINT64_MAX
+
+/*
+ * Which version of @chunk the log holds now: a number that is different
+ * after every append of that chunk, or LOG_ABSENT.
+ */
+uint64_t log_version(const struct log *l, uint64_t chunk);
+
+/*
+ * Append @data for @chunk only if the log still holds @version of it.
+ * -EAGAIN, and nothing written, if the chunk was appended in the meantime.
+ *
+ * For changing part of a chunk without a lock: note the version, read the
+ * chunk, change it, append; on -EAGAIN someone else got in first, so do it
+ * again on top of theirs.
+ */
+int log_append_if(struct log *l, uint64_t chunk, const uint8_t *data, uint64_t version);
+
 /*
  * Take a snapshot: step the epoch, in a way that survives a reopen with no
  * further writes, and keep the map as it is now for views of the snapshot.

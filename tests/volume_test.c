@@ -330,6 +330,54 @@ static void test_concurrent_fetch(void)
 	teardown(v);
 }
 
+/*
+ * Several threads each keep rewriting their own slice of the same few
+ * chunks. A write to part of a chunk reads the chunk, changes its part and
+ * appends the whole; if two of those interleave, the later append carries
+ * the other's slice as it was before, and that update is lost.
+ */
+static void *slice_writer(void *arg)
+{
+	struct vbd *v = ((void **)arg)[0];
+	unsigned id = (uintptr_t)((void **)arg)[1];
+	uint8_t slice[CHUNK / NTHREADS], back[CHUNK / NTHREADS];
+
+	rcu_register_thread();
+	for (int round = 0; round < 200; round++) {
+		/* a new value each round, so that a neighbour's stale copy of it shows */
+		memset(slice, round == 199 ? id + 1 : round, sizeof(slice));
+		for (unsigned c = 0; c < 4; c++) {
+			uint64_t off = c * CHUNK + id * sizeof(slice);
+
+			assert(vbd_write(v, slice, sizeof(slice), off) == sizeof(slice));
+			assert(vbd_read(v, back, sizeof(back), off) == sizeof(back));
+			assert(memcmp(slice, back, sizeof(slice)) == 0);
+		}
+	}
+	rcu_unregister_thread();
+	return NULL;
+}
+
+static void test_concurrent_partial_writes(void)
+{
+	struct vbd *v = setup();
+	void *args[NTHREADS][2];
+	pthread_t t[NTHREADS];
+
+	for (uintptr_t i = 0; i < NTHREADS; i++) {
+		args[i][0] = v;
+		args[i][1] = (void *)i;
+		assert(pthread_create(&t[i], NULL, slice_writer, args[i]) == 0);
+	}
+	for (int i = 0; i < NTHREADS; i++)
+		assert(pthread_join(t[i], NULL) == 0);
+	for (unsigned c = 0; c < 4; c++)
+		for (unsigned i = 0; i < NTHREADS; i++)
+			memset(ref + c * CHUNK + i * (CHUNK / NTHREADS), i + 1, CHUNK / NTHREADS);
+	check_all(v);
+	teardown(v);
+}
+
 /* The header of record @n, read straight from the file. */
 static void read_hdr(uint64_t n, void *hdr)
 {
@@ -897,6 +945,7 @@ int main(void)
 	RUN(test_stale_base);
 	RUN(test_offline_base);
 	RUN(test_concurrent_fetch);
+	RUN(test_concurrent_partial_writes);
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);

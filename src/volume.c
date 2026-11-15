@@ -213,11 +213,16 @@ static int read_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 /*
  * Replace @len bytes at @within of @chunk. A whole chunk is appended as it
  * is; a part of one is read-modify-write, since a record holds a whole
- * chunk.
+ * chunk. Two of those on one chunk must not interleave, or the later
+ * append would carry the bytes the earlier one replaced as they were
+ * before. No lock is held over the read, which may go out to the base:
+ * the append goes through only if the chunk is still as it was read, and
+ * otherwise the whole thing is done again on top of what got in first.
  */
 static int write_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 		       uint32_t within, uint32_t len)
 {
+	uint64_t version;
 	uint8_t *tmp;
 	int ret;
 
@@ -226,11 +231,14 @@ static int write_chunk(struct vbd *v, uint64_t chunk, uint8_t *buf,
 	tmp = malloc(v->chunk_size);
 	if (!tmp)
 		return -ENOMEM;
-	ret = read_chunk(v, chunk, tmp, 0, v->chunk_size);
-	if (!ret) {
-		memcpy(tmp + within, buf, len);
-		ret = log_append(&v->data, chunk, tmp);
-	}
+	do {
+		version = log_version(&v->data, chunk);
+		ret = read_chunk(v, chunk, tmp, 0, v->chunk_size);
+		if (!ret) {
+			memcpy(tmp + within, buf, len);
+			ret = log_append_if(&v->data, chunk, tmp, version);
+		}
+	} while (ret == -EAGAIN);
 	free(tmp);
 	return ret;
 }
