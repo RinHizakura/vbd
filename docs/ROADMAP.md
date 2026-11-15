@@ -110,16 +110,19 @@ Done:
   EROFS), loaded from the checkpoint snapshot N wrote, without reading any
   record before or after it. `vbd read ... N` and `vbd info ... N` use it.
 
+- Time: a snapshot's checkpoint records when it was taken, and
+  `vbd_open_before(log, time)` opens the newest snapshot taken by then, by
+  walking the checkpoint headers back from the end of the log. Wherever
+  the CLI takes a snapshot number it takes `@<seconds since 1970>` too.
+  `test_open_before` writes, snapshots, writes everything again, and gets
+  the earlier content back byte for byte.
+
 Remaining:
 
 - `fork(parent, name)`: new directory, empty XArray, parent pointer; parent
   is frozen at its current epoch
 - lookup walks the branch chain before falling back to the base cache
-- a timer that snapshots periodically; manifest records epoch -> time
-- `at(branch, time)`: load the newest checkpoint at or before the time,
-  replay the log up to that epoch, expose the result as a read-only branch
-- test: write, snapshot, write again, then check that `at` returns the
-  earlier content byte-for-byte
+- a timer that snapshots periodically
 
 ## P4: ublk front end
 

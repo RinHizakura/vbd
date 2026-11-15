@@ -45,6 +45,11 @@ printf 'later' | "$VBD" write t.log 4090
 [ "$("$VBD" read t.log 4090 5)" = later ] || fail "live read sees the new write"
 expect 1 "$VBD" read t.log 0 1M 2                     # no such snapshot
 
+# a snapshot can be named by time: the newest one taken by then
+"$VBD" read t.log 0 1M "@$(date +%s)" | cmp -s - expect.img || fail "read as of now"
+expect 1 "$VBD" read t.log 0 1M @1		# 1970: before the first snapshot
+expect 2 "$VBD" read t.log 0 1M @soon
+
 # the write survives a reopen
 "$VBD" read t.log 4090 9 | cmp -s - <<'EOT' || fail reopen
 hello vbd

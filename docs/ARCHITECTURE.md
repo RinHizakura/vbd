@@ -187,12 +187,14 @@ One request, by tag:
            ^ crc covers the data               epoch: snapshots taken before this write
 
  checkpoint record (the same size, a header of its own kind)
- +-------+-------+-------+------+-------+-------+------------+------+--------------------------+
- | magic | crc   | epoch | part | parts | count | next_epoch | pad  | data: count map entries, |
- | "vbck"| u32   | u64   | u32  | u32   | u64   | u64        | 24 B | (chunk, record), two u64 |
- +-------+-------+-------+------+-------+-------+------------+------+--------------------------+
+ +-------+-------+-------+------+-------+-------+------------+------+------+----------------+
+ | magic | crc   | epoch | part | parts | count | next_epoch | time | pad  | data: count    |
+ | "vbck"| u32   | u64   | u32  | u32   | u64   | u64        | u64  | 16 B | map entries    |
+ +-------+-------+-------+------+-------+-------+------------+------+------+----------------+
            epoch: no record the checkpoint covers has a larger one
            next_epoch: what records after it are stamped with
+           time: when a snapshot was taken, seconds since 1970; 0 otherwise
+           a map entry is (chunk, record) as two u64
 
  Every header is 64 bytes and starts with magic and crc; the magic says how
  to read the rest. A checkpoint is `parts` consecutive checkpoint records
@@ -200,8 +202,9 @@ One request, by tag:
  every record before its part 0.
 
  A snapshot is a checkpoint with next_epoch = epoch + 1: it is snapshot
- number `epoch`, the map it holds is the content that snapshot froze, and
- it is what makes the step to the next epoch last. Any other checkpoint
+ number `epoch`, the map it holds is the content that snapshot froze, it is
+ what makes the step to the next epoch last, and its time is how the
+ snapshot is found by date. Any other checkpoint
  has next_epoch = epoch.
 ```
 

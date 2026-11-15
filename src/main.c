@@ -34,6 +34,8 @@ static int usage(void)
 	fputs("usage: vbd [-p <chunks>] <command> ...\n", stderr);
 	for (const struct cmd *c = cmds; c->name; c++)
 		fprintf(stderr, "  %-8s %-40s %s\n", c->name, c->args, c->help);
+	fputs("  [snapshot] is a snapshot's number, or @<seconds since 1970> for the newest one taken by then\n",
+	      stderr);
 	fprintf(stderr, "  %-49s %s\n", "-p <chunks>",
 		"when a base chunk has to be fetched, also fetch this many after it, in the background");
 	return 2;
@@ -223,9 +225,10 @@ int main(int argc, char **argv)
 {
 	const struct cmd *c = cmds;
 	uint64_t n[MAX_ARGS] = { 0 }, prefetch = 0;
-	const char *log;
+	const char *log, *when_s = NULL;
 	struct vbd *v;
 	int nargs, opt, ret;
+	uint64_t when;
 	bool at;
 
 	while ((opt = getopt(argc, argv, "+p:")) != -1)	/* "+": options come before the command */
@@ -244,13 +247,18 @@ int main(int argc, char **argv)
 	log = argv[2];
 	if (c->make)
 		return c->make(log, argv + 3, nargs);
+	at = c->at && nargs == c->max;
+	if (at && argv[3 + nargs - 1][0] == '@')
+		when_s = argv[3 + --nargs] + 1;	/* a snapshot named by time, not number */
 	for (int i = 0; i < nargs; i++)
 		if (parse_size(argv[3 + i], &n[i]))
 			return usage();
-	at = c->at && nargs == c->max;
+	if (when_s && (parse_size(when_s, &when) || when > INT64_MAX))
+		return usage();
 
 	rcu_register_thread();
-	v = at ? vbd_open_at(log, n[nargs - 1]) : vbd_open(log);
+	v = when_s ? vbd_open_before(log, when) :
+	    at ? vbd_open_at(log, n[nargs - 1]) : vbd_open(log);
 	if (!v) {
 		fprintf(stderr, "vbd: %s: %s\n", log, strerror(errno));
 		return 1;

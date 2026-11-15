@@ -62,7 +62,12 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	return ret;
 }
 
-struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
+/*
+ * Open the volume as of @snapshot, LIVE for as it is now and writable. With
+ * @before, as of the newest snapshot taken by that time instead.
+ */
+static struct vbd *open_volume(const char *log_path, uint64_t snapshot,
+			       const int64_t *before)
 {
 	struct vbd *v = calloc(1, sizeof(*v));
 	struct super sb;
@@ -79,6 +84,8 @@ struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
 		err = -EINVAL;
 		goto fail;
 	}
+	if (before && (err = log_snapshot_before(&v->data, sb.chunk_size, *before, &v->at)))
+		goto fail;	/* -ENOENT: no snapshot that old */
 	if (writable(v) && (err = log_lock(&v->data)))
 		goto fail;	/* someone else is writing it */
 	v->size = sb.size;
@@ -104,7 +111,17 @@ fail:
 
 struct vbd *vbd_open(const char *log_path)
 {
-	return vbd_open_at(log_path, LIVE);
+	return open_volume(log_path, LIVE, NULL);
+}
+
+struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot)
+{
+	return open_volume(log_path, snapshot, NULL);
+}
+
+struct vbd *vbd_open_before(const char *log_path, int64_t when)
+{
+	return open_volume(log_path, 0, &when);
 }
 
 void vbd_close(struct vbd *v)

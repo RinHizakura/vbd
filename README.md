@@ -67,6 +67,7 @@ usage: vbd [-p <chunks>] <command> ...
   snapshot <log>                                    freeze the current content; prints the snapshot number
   serve    <log> [snapshot]                         expose the volume as /dev/ublkbN until SIGINT or SIGTERM; needs root
   manifest <image> <chunk>                          write the manifest of a base image to stdout, for create's [manifest]
+  [snapshot] is a snapshot's number, or @<seconds since 1970> for the newest one taken by then
   -p <chunks>                                       when a base chunk has to be fetched, also fetch this many after it, in the background
 ```
 
@@ -80,6 +81,7 @@ vbd read disk.log 0 4K                # range to stdout
 printf 'hi' | vbd write disk.log 4090 # stdin to the volume
 vbd snapshot disk.log                 # freeze the current content; prints the snapshot number
 vbd read disk.log 0 4K 0              # the same range as it was at snapshot 0
+vbd read disk.log 0 4K @$(date -d '10 minutes ago' +%s)   # ... as it was ten minutes ago
 sudo vbd serve disk.log               # prints /dev/ublkbN; Ctrl-C removes it again
 sudo vbd serve disk.log 0             # a read-only device showing snapshot 0
 ```

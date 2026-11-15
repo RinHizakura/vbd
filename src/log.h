@@ -69,7 +69,8 @@ struct ckpt_hdr {
 	 * the checkpoint is a snapshot, the one numbered @epoch.
 	 */
 	uint64_t next_epoch;
-	uint8_t  pad[HDR_SIZE - 40];
+	uint64_t time;		/* a snapshot: when it was taken, in seconds since 1970; else 0 */
+	uint8_t  pad[HDR_SIZE - 48];
 };
 _Static_assert(sizeof(struct rec_hdr) == HDR_SIZE && sizeof(struct ckpt_hdr) == HDR_SIZE,
 	       "record headers");
@@ -119,6 +120,14 @@ int log_open(struct log *l, const char *path, void *super);
  * until close. A view needs none and can be loaded beside the writer.
  */
 int log_lock(struct log *l);
+
+/*
+ * Before loading: the number of the newest snapshot taken at or before
+ * @when, seconds since 1970, to load a view of. The log's records hold
+ * @chunk_size bytes of data. -ENOENT if there is none.
+ */
+int log_snapshot_before(struct log *l, uint32_t chunk_size, int64_t when,
+			uint64_t *snapshot);
 
 /*
  * Build the map from the file, given the geometry the super block

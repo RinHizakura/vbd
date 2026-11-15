@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <urcu.h>
 
@@ -618,6 +619,43 @@ static void test_shared_cache(void)
 }
 
 /*
+ * A snapshot remembers when it was taken, and a volume can be opened as it
+ * was at a time: at the newest snapshot taken by then. The content is the
+ * earlier one, byte for byte, although everything was written again since.
+ */
+static void test_open_before(void)
+{
+	struct vbd *v = setup();
+	static uint8_t earlier[SIZE];
+	time_t t0, t1;
+
+	assert(vbd_open_before(log_path, time(NULL)) == NULL && errno == ENOENT);
+	fill_random(buf, 3 * CHUNK);
+	assert(vbd_write(v, buf, 3 * CHUNK, 0) == 3 * CHUNK);
+	memcpy(ref, buf, 3 * CHUNK);
+	memcpy(earlier, ref, SIZE);
+	assert(vbd_snapshot(v) == 0);			/* snapshot 0, within second t0 */
+	t0 = time(NULL);
+	fill_random(buf, SIZE);
+	assert(vbd_write(v, buf, SIZE, 0) == SIZE);	/* write again, all of it */
+	memcpy(ref, buf, SIZE);
+	while ((t1 = time(NULL)) == t0)			/* times are whole seconds */
+		usleep(10000);
+	assert(vbd_snapshot(v) == 0);			/* snapshot 1, at t1 or later */
+	vbd_close(v);
+
+	assert(vbd_open_before(log_path, t0 - 10) == NULL && errno == ENOENT);
+	v = vbd_open_before(log_path, t0);		/* snapshot 0: 1 is too new */
+	assert(v && vbd_read(v, buf, SIZE, 0) == SIZE && memcmp(buf, earlier, SIZE) == 0);
+	assert(vbd_write(v, buf, CHUNK, 0) == -EROFS);
+	vbd_close(v);
+	v = vbd_open_before(log_path, time(NULL) + 10);	/* snapshot 1 */
+	assert(v);
+	check_all(v);
+	teardown(v);
+}
+
+/*
  * A view leaves the file as it finds it: what looks like a torn tail may be
  * a record another process is still writing. That holds when the view is
  * loaded from its snapshot's checkpoint, when it has to replay because the
@@ -802,6 +840,7 @@ int main(void)
 	RUN(test_snapshot);
 	RUN(test_open_at);
 	RUN(test_snapshot_checkpoint);
+	RUN(test_open_before);
 	RUN(test_prefetch);
 	RUN(test_manifest);
 	RUN(test_one_writer);

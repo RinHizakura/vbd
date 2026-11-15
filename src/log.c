@@ -11,6 +11,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -123,7 +124,8 @@ static int ckpt_write(struct log *l, bool snap)
 {
 	uint64_t per = per_record(l), n = 0, first = l->nrec, *ent;
 	struct ckpt_hdr h = { .magic = CKPT_MAGIC, .epoch = l->epoch,
-			      .next_epoch = l->epoch + snap };
+			      .next_epoch = l->epoch + snap,
+			      .time = snap ? time(NULL) : 0 };
 	unsigned long chunk;
 	void *e;
 	int ret = 0;
@@ -363,6 +365,32 @@ static int log_replay(struct log *l)
 out:
 	free(data);
 	return ret;
+}
+
+int log_snapshot_before(struct log *l, uint32_t chunk_size, int64_t when,
+			uint64_t *snapshot)
+{
+	struct ckpt_hdr h;
+	struct stat st;
+	uint64_t rec;
+	int ret;
+
+	l->chunk_size = chunk_size;	/* where the records lie */
+	if (fstat(l->fd, &st))
+		return -errno;
+	if (st.st_size < SUPER_SIZE)
+		return -ENOENT;
+	/* back from the end: the first snapshot old enough is the newest one that is */
+	for (rec = (st.st_size - SUPER_SIZE) / (HDR_SIZE + chunk_size); rec-- > 0; ) {
+		if ((ret = rec_read_hdr(l, rec, &h)))
+			return ret;
+		if (h.magic == CKPT_MAGIC && h.next_epoch == h.epoch + 1 &&
+		    h.part + 1 == h.parts && (int64_t)h.time <= when) {
+			*snapshot = h.epoch;
+			return 0;
+		}
+	}
+	return -ENOENT;
 }
 
 int log_load(struct log *l, uint32_t chunk_size, uint64_t nchunks, uint64_t upto)

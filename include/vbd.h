@@ -55,6 +55,12 @@ struct vbd *vbd_open(const char *log_path);
  * Views can be open while the volume is open for writing.
  */
 struct vbd *vbd_open_at(const char *log_path, uint64_t snapshot);
+
+/*
+ * The same, for the newest snapshot taken at or before @when, in seconds
+ * since 1970. ENOENT if no snapshot is that old.
+ */
+struct vbd *vbd_open_before(const char *log_path, int64_t when);
 void vbd_close(struct vbd *v);
 
 uint64_t vbd_size(const struct vbd *v);
