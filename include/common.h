@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -52,6 +53,16 @@ static inline int read_exact(const char *path, void *buf, size_t len)
 		ret = full_pread(fd, buf, len, 0);
 	close(fd);
 	return ret;
+}
+
+/* <log_path><suffix>, the name of a file kept next to a log; the caller frees it. */
+static inline char *side_path(const char *log_path, const char *suffix)
+{
+	char *p = malloc(strlen(log_path) + strlen(suffix) + 1);
+
+	if (p)
+		strcat(strcpy(p, log_path), suffix);
+	return p;
 }
 
 #endif /* VBD_COMMON_H */

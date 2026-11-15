@@ -23,7 +23,7 @@ struct super {
 	uint64_t size;
 	uint64_t base_size;	/* size of the base at create */
 	uint64_t parent_at;	/* a fork: the parent's snapshot it continues from; else NO_PARENT */
-	uint8_t  manifest_hash[SHA256_LEN];	/* sha256 of the base's manifest; all zero: it has none */
+	uint8_t  manifest_hash[SHA256_LEN];	/* manifest_hash of the base's manifest; all zero: it has none */
 	char     base_tag[BASE_TAG_LEN];	/* base validator at create (base_ops.probe) */
 	/*
 	 * The base image, as a path or URL, or for a fork the path of the
@@ -65,24 +65,8 @@ int super_set_parent(struct super *sb, const char *parent_log, uint64_t snapshot
 /* The log of the volume this one was forked from, or NULL if it is not a fork. */
 const char *super_parent(const struct super *sb);
 
-/*
- * A manifest of the base is the sha256 of each of its chunks, the last one
- * padded with zeros, SHA256_LEN bytes each. This is how long that is for
- * the base and chunk size in @sb.
- */
-size_t super_manifest_len(const struct super *sb);
-/*
- * Give the new volume the manifest in the file at @path: read it and note
- * its own sha256, so that the copy kept with the volume can be trusted
- * later. Call after super_set_base. Hands the manifest back in *@manifest
- * for the caller to store and free. -EINVAL if it is not a manifest of
- * this base at this chunk size.
- */
-int super_set_manifest(struct super *sb, const char *path, uint8_t **manifest);
 /* Was the volume created with a manifest? */
 bool super_has_manifest(const struct super *sb);
-/* Is @manifest, super_manifest_len(@sb) bytes long, the one the volume was created with? */
-bool super_check_manifest(const struct super *sb, const uint8_t *manifest);
 /* Checksum @sb; it must not change afterwards. */
 void super_seal(struct super *sb);
 /* Sealed, undamaged, and everything super_init insists on? */

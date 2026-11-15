@@ -46,6 +46,13 @@ struct vbd;
 int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path, const char *manifest_path);
 
+/*
+ * Write the manifest of the image in the file at @image, cut in chunks of
+ * @chunk_size, to @fd: for vbd_create's @manifest_path. Make it from a copy
+ * of the base that is known to be good.
+ */
+int vbd_manifest(const char *image, uint32_t chunk_size, int fd);
+
 /* For vbd_fork: from the parent as it is now. What vbd_at says of a writable volume. */
 #define VBD_HEAD	UINT64_MAX
 

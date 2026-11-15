@@ -593,24 +593,6 @@ static void test_prefetch(void)
 	teardown(v);
 }
 
-/* Write a manifest of the base to <base>.manifest, wrong for @bad_chunk (-1: for none). */
-static void write_manifest(char *path, size_t path_len, int bad_chunk)
-{
-	uint8_t sum[SHA256_LEN];
-	FILE *f;
-
-	snprintf(path, path_len, "%s.manifest", base_path);
-	f = fopen(path, "w");
-	assert(f);
-	for (size_t c = 0; c < SIZE / 2 / CHUNK; c++) {
-		sha256(ref + c * CHUNK, CHUNK, sum);
-		if ((int)c == bad_chunk)
-			sum[0] ^= 1;
-		assert(fwrite(sum, sizeof(sum), 1, f) == 1);
-	}
-	assert(fclose(f) == 0);
-}
-
 /*
  * With a manifest, a chunk fetched from the base that does not match it is
  * refused and stays out of the cache. The manifest kept with the volume is
@@ -625,13 +607,18 @@ static void test_manifest(void)
 	struct vbd *v = setup();
 	char manifest[sizeof(base_path) + 16], kept[sizeof(log_path) + 16];
 	uint8_t sum[SHA256_LEN];
+	int fd;
 
 	sha256("abc", 3, sum);
 	assert(memcmp(sum, abc, SHA256_LEN) == 0);
 
 	vbd_close(v);				/* setup's volume has no manifest: make one that has */
 	assert(system("rm -f /tmp/vbd-base-*.log /tmp/vbd-base-*.log.cache") == 0);
-	write_manifest(manifest, sizeof(manifest), 3);	/* says something else about chunk 3 */
+	snprintf(manifest, sizeof(manifest), "%s.manifest", base_path);
+	fd = open(manifest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	assert(fd >= 0 && vbd_manifest(base_path, CHUNK, fd) == 0);
+	close(fd);
+	flip_bit(manifest, 3 * SHA256_LEN);	/* now it says something else about chunk 3 */
 	assert(vbd_create(log_path, SIZE, 2 * CHUNK, base_path, manifest) == -EINVAL);	/* other chunk size */
 	assert(vbd_create(log_path, SIZE, CHUNK, NULL, manifest) == -EINVAL);		/* of what base? */
 	assert(vbd_create(log_path, SIZE, CHUNK, base_path, manifest) == 0);

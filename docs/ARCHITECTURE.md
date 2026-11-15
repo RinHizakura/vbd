@@ -24,11 +24,18 @@ What is built today, drawn as blocks.
  |  |  src/volume.c                                                  |  |
  |  |  a volume: cuts a byte range into chunks; a chunk is read from |  |
  |  |  the data log or, if it was never written, from the base cache |  |
- |  +-------+-------------------------+-----------------------+------+  |
- |          |                         |                       |         |
- |          v                         v                       v         |
- |  +----------------+       +------------------+      +-------------+  |
- |  |  src/log.c     |       |  src/cache.c     |      | src/super.c |  |
+ |  +-------+-------------------------+-----------+-----------+------+  |
+ |          |                         |           |           |         |
+ |          |                         |           v           |         |
+ |          |                         |  +----------------+   |         |
+ |          |                         |  | src/manifest.c |   |         |
+ |          |                         |  | the manifest   |   |         |
+ |          |                         |  | of a base      |   |         |
+ |          |                         |  +----------------+   |         |
+ |          |                         |           ^           |         |
+ |          v                         v           |           v         |
+ |  +----------------+       +------------------+ |    +-------------+  |
+ |  |  src/log.c     |       |  src/cache.c     +-+    | src/super.c |  |
  |  |  a record log: | <---- |  the base cache: | ---> | the super   |  |
  |  |  records, map, |       |  fetch a chunk   |      | block: size |  |
  |  |  replay,       |       |  once and keep   |      | of volume,  |  |

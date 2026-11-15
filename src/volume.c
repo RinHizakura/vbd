@@ -21,6 +21,7 @@
 #include "vbd.h"
 #include "cache.h"
 #include "log.h"
+#include "manifest.h"
 #include "super.h"
 
 _Static_assert(VBD_HEAD == ALL_EPOCHS, "vbd_at is log_at");
@@ -44,7 +45,7 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 	       const char *base_path, const char *manifest_path)
 {
 	struct super sb;
-	uint8_t *manifest = NULL;
+	struct manifest *m = NULL;
 	int ret = super_init(&sb, size, chunk_size);
 
 	if (ret)
@@ -53,13 +54,17 @@ int vbd_create(const char *log_path, uint64_t size, uint32_t chunk_size,
 		return -EINVAL;
 	if (base_path && (ret = super_set_base(&sb, base_path)))
 		return ret;
-	if (manifest_path && (ret = super_set_manifest(&sb, manifest_path, &manifest)))
-		return ret;
+	if (manifest_path) {
+		m = manifest_read(manifest_path, sb.base_size, chunk_size);
+		if (!m)
+			return -errno;	/* -EINVAL: not of this base at this chunk size */
+		manifest_hash(m, sb.manifest_hash);
+	}
 	super_seal(&sb);
 	ret = log_create(log_path, &sb);
-	if (!ret && base_path && (ret = cache_create(log_path, &sb, manifest)))
+	if (!ret && base_path && (ret = cache_create(log_path, &sb, m)))
 		unlink(log_path);
-	free(manifest);
+	manifest_close(m);
 	return ret;
 }
 

@@ -12,7 +12,6 @@
 
 #include <vbd.h>
 
-#include "sha256.h"
 #include "ublk/ublk.h"
 
 #define BUF_SIZE	(1 << 20)
@@ -103,36 +102,18 @@ static int cmd_fork(const char *parent, char **args, int n)
 	return 0;
 }
 
-/*
- * The manifest of an image: one sha256 per chunk, a short last chunk padded
- * with zeros, which is how the engine reads it.
- */
 static int cmd_manifest(const char *image, char **args, int n)
 {
-	uint8_t *buf, sum[SHA256_LEN];
 	uint64_t chunk;
-	size_t got;
-	FILE *f;
+	int ret;
 
 	if (parse_size(args[0], &chunk) || !chunk || chunk > UINT32_MAX)
 		return usage();
-	f = fopen(image, "r");
-	buf = malloc(chunk);
-	if (!f || !buf) {
-		fprintf(stderr, "vbd manifest: %s: %s\n", image, strerror(errno));
+	ret = vbd_manifest(image, chunk, STDOUT_FILENO);
+	if (ret) {
+		fprintf(stderr, "vbd manifest: %s: %s\n", image, strerror(-ret));
 		return 1;
 	}
-	while ((got = fread(buf, 1, chunk, f)) > 0) {
-		memset(buf + got, 0, chunk - got);
-		sha256(buf, chunk, sum);
-		fwrite(sum, 1, sizeof(sum), stdout);
-	}
-	if (ferror(f) || fflush(stdout)) {
-		fprintf(stderr, "vbd manifest: %s\n", strerror(errno));
-		return 1;
-	}
-	fclose(f);
-	free(buf);
 	return 0;
 }
 
