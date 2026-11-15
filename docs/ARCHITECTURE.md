@@ -113,6 +113,9 @@ them do not know about each other.
 - Record number and file offset are interchangeable:
   `rec_off(n) = 4096 + n * rec_size`. The map stores only the small integer
   `n` as an XArray value entry; no per-chunk allocation.
+- A chunk that was zeroed or discarded has an entry too, with a reserved
+  value in place of a record number: it reads as zeros without touching a
+  file, and it hides the base.
 - Chunks never written (1..4) have no entry. Without a base they read as
   zeros. With a base, reads of them go to the base cache, and on a miss
   there, to the base image. The cache holds a second `struct log` over
@@ -168,7 +171,8 @@ One request, by tag:
    the parked command. That queue's thread sees a CQE carrying the tag.
 3. The thread reads `iod[tag]`. For a write it `pread`s the request's data
    into its buffer and calls `vbd_write`; for a read it calls `vbd_read`
-   and `pwrite`s the result into the request; a flush is `vbd_flush`.
+   and `pwrite`s the result into the request; a flush is `vbd_flush`, a
+   discard or a write of zeros `vbd_zero`, with no data to move.
 4. It sends `COMMIT_AND_FETCH_REQ` with the tag and the result. The driver
    ends the block request and parks the command again for the next one.
 5. On SIGINT or SIGTERM the main thread sends `STOP_DEV`: every parked
@@ -193,11 +197,15 @@ One request, by tag:
    parent's log instead; a fork has no base, tag or manifest of its own.
 
  record (64 B header + chunk_size B data)
- +-------+-------+-------+-------+----------+------------------------------------+
- | magic | crc   | chunk | epoch | pad      | data: exactly chunk_size bytes     |
- | "vbd1"| u32   | u64   | u64   | 40 B     |                                    |
- +-------+-------+-------+-------+----------+------------------------------------+
+ +-------+-------+-------+-------+----------+------+--------------------------------+
+ | magic | crc   | chunk | epoch | zero_cnt | pad  | data: exactly chunk_size bytes |
+ | "vbd1"| u32   | u64   | u64   | u64      | 32 B |                                |
+ +-------+-------+-------+-------+----------+------+--------------------------------+
            ^ crc covers the data               epoch: snapshots taken before this write
+
+ zero_cnt 0: the data is the content of chunk. zero_cnt n: the n chunks
+ from chunk on are zero, and the data is not used; that is how a discard
+ of any length is one record.
 
  checkpoint record (the same size, a header of its own kind)
  +-------+-------+-------+------+-------+-------+------------+------+------+----------------+

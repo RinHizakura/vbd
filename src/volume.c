@@ -292,6 +292,43 @@ ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off)
 	return each_span(v, (uint8_t *)buf, len, off, write_chunk);
 }
 
+/* Write @len zero bytes at @off, less than a chunk of them, from the zero chunk @zero. */
+static int write_zeros(struct vbd *v, uint8_t *zero, uint64_t off, uint64_t len)
+{
+	ssize_t n = len ? each_span(v, zero, len, off, write_chunk) : 0;
+
+	return n < 0 ? n : (uint64_t)n == len ? 0 : -EIO;
+}
+
+int vbd_zero(struct vbd *v, uint64_t off, uint64_t len)
+{
+	uint32_t cs = v->chunk_size;
+	uint64_t end = off + len;
+	uint64_t first = (off + cs - 1) / cs, last = end / cs;	/* the whole chunks: [first, last) */
+	uint8_t *zero;
+	int ret;
+
+	if (!writable(v))
+		return -EROFS;
+	if (off > v->size || len > v->size - off)
+		return -EINVAL;
+	zero = calloc(1, cs);
+	if (!zero)
+		return -ENOMEM;
+	if (first > last) {		/* all of it inside one chunk */
+		ret = write_zeros(v, zero, off, len);
+	} else {
+		/* part of a chunk at either end is rewritten; the chunks between cost one record */
+		ret = write_zeros(v, zero, off, first * cs - off);
+		if (!ret && first < last)
+			ret = log_append_zero(&v->data, first, last - first);
+		if (!ret)
+			ret = write_zeros(v, zero, last * cs, end - last * cs);
+	}
+	free(zero);
+	return ret;
+}
+
 int vbd_flush(struct vbd *v)
 {
 	/* the cache can always be refetched; only the data log needs to last */

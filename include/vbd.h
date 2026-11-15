@@ -100,6 +100,14 @@ ssize_t vbd_read(struct vbd *v, void *buf, size_t len, uint64_t off);
 ssize_t vbd_write(struct vbd *v, const void *buf, size_t len, uint64_t off);
 
 /*
+ * Make [@off, @off + @len) read as zeros. The whole chunks in the range
+ * cost one record between them, however many there are; part of a chunk at
+ * either end is rewritten. What the base or the parent holds there is no
+ * longer seen. -EINVAL if the range leaves the volume.
+ */
+int vbd_zero(struct vbd *v, uint64_t off, uint64_t len);
+
+/*
  * Fetch ahead: from now on, when a read has to fetch a chunk from the base,
  * up to @chunks of the chunks after it are fetched in the background as
  * well, stopping at one that is already there. Off by default, since it

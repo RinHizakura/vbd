@@ -92,7 +92,9 @@ sudo vbd serve disk.log 0             # a read-only device showing snapshot 0
 ```
 
 The served device is an ordinary block device: `mkfs`, `mount`, `dd`, a VM
-all work on it. Flushes go to disk before they are acknowledged.
+all work on it. Flushes go to disk before they are acknowledged. Discards
+are honoured: a discarded range reads as zeros afterwards and costs one
+record of log space however long it is.
 
 Snapshots are numbered from 0. Each one stores the volume's index as it is
 at that moment, 16 bytes per chunk written so far, rounded up to whole

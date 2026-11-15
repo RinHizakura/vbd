@@ -148,6 +148,12 @@ Done:
   CPU, where the bounce buffers alone could reach 320 MiB. Not zero copy:
   the engine checksums what it stores, so the data has to pass through
   user memory once anyway. Needs Linux 6.5.
+- DISCARD and WRITE_ZEROES both map to `vbd_zero`. One record says that a
+  run of whole chunks is zero, however long the run, and the map marks
+  those chunks with a reserved value in place of a record number; part of
+  a chunk at either end is rewritten. A hole in the map would not do: it
+  would show the base or the parent again. The device advertises a
+  discard granularity of one chunk.
 - `tests/ublk_test.sh`: dd through the device, read-only snapshot device,
   four writers on different CPUs filling the same chunks piecemeal,
   mkfs.ext4 + mount + fsck across a server restart. Skipped without
@@ -155,7 +161,6 @@ Done:
 
 Remaining:
 
-- DISCARD and WRITE_ZEROES (a zero record, or a hole in the map)
 - `UBLK_F_USER_RECOVERY`: survive a server restart without unmounting
 - `fio` against a loop device over the same image; boot a VM from the device
 

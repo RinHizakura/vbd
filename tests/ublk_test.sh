@@ -1,7 +1,7 @@
 #!/bin/sh
 # Serve a volume as a ublk block device and use it through the kernel: raw
 # reads and writes with dd, a read-only snapshot device, writers on several
-# CPUs at once, an ext4 filesystem
+# CPUs at once, discard, an ext4 filesystem
 # that survives a server restart, and an ext4 image fetched over HTTP of
 # which a check and a mount download only a small part. Needs sudo without
 # a password and the ublk_drv module; skipped otherwise.
@@ -92,6 +92,22 @@ sudo -n dd if="$dev" bs=4k count=512 iflag=direct status=none | cmp -s - mixed.i
 	fail "writes from several CPUs into the same chunks"
 stop
 "$VBD" read t.log 0 2M | cmp -s - mixed.img || fail "the same after the server stopped"
+
+# discard and write-zeroes: the range reads as zeros, costs a record or two
+# however long it is, and its neighbours are left alone
+if command -v blkdiscard > /dev/null; then
+	"$VBD" read t.log 0 8M > whole.img
+	before=$(stat -c %s t.log)
+	serve t.log
+	sudo -n blkdiscard -o $((2 << 20)) -l $((2 << 20)) "$dev"	# 2 MiB at 2 MiB
+	sudo -n blkdiscard -z -o $((5 << 20)) -l $((2 << 20)) "$dev"	# zero 2 MiB at 5 MiB
+	stop
+	{ head -c 2M whole.img; head -c 2M /dev/zero; tail -c +$((4 * 1048576 + 1)) whole.img | head -c 1M
+	  head -c 2M /dev/zero; tail -c 1M whole.img; } > holes.img
+	"$VBD" read t.log 0 8M | cmp -s - holes.img || fail "discarded and zeroed ranges"
+	recs=$(( ($(stat -c %s t.log) - before) / (64 + 65536) ))
+	[ "$recs" -ge 1 ] && [ "$recs" -le 4 ] || fail "zeroing 4 MiB took $recs records"
+fi
 
 # a filesystem on top, written, then checked and read back after a restart
 if command -v mkfs.ext4 > /dev/null; then

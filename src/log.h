@@ -8,8 +8,9 @@
  *
  * Records have a fixed size, so record number <-> file offset is arithmetic
  * and the XArray only has to store the record number as a value entry. A
- * data record carries one whole chunk; the map points each chunk at the
- * newest record written for it.
+ * data record carries one whole chunk, or says that a run of chunks is
+ * zero; the map points each chunk at the newest record written for it, or
+ * marks it as zero.
  *
  * Every header is HDR_SIZE bytes and starts with magic and crc; the magic
  * says which kind the rest is. Two kinds: struct rec_hdr and struct
@@ -50,7 +51,12 @@ struct rec_hdr {
 	uint32_t crc;
 	uint64_t chunk;
 	uint64_t epoch;		/* snapshots taken before this record was written */
-	uint8_t  pad[HDR_SIZE - 24];
+	/*
+	 * 0: the data is the content of @chunk. n: the n chunks from @chunk on
+	 * are zero, and the data is not used.
+	 */
+	uint64_t zero_cnt;
+	uint8_t  pad[HDR_SIZE - 32];
 };
 
 /*
@@ -156,6 +162,13 @@ void log_close(struct log *l);
 
 /* Append one whole chunk and publish it in the map. */
 int log_append(struct log *l, uint64_t chunk, const uint8_t *data);
+
+/*
+ * Append the statement that the @count chunks from @chunk on are zero: one
+ * record, however many chunks. The log holds them afterwards, and they read
+ * as zeros.
+ */
+int log_append_zero(struct log *l, uint64_t chunk, uint64_t count);
 
 /* What log_version says of a chunk the log does not hold. */
 #define LOG_ABSENT	UINT64_MAX

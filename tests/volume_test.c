@@ -144,7 +144,13 @@ static void test_random_io(void)
 
 		if (off + len > SIZE)
 			len = SIZE - off;
-		if (rand() % 2) {
+		if (rand() % 8 == 0) {
+			len *= 4;	/* long enough to take in whole chunks */
+			if (off + len > SIZE)
+				len = SIZE - off;
+			assert(vbd_zero(v, off, len) == 0);
+			memset(ref + off, 0, len);
+		} else if (rand() % 2) {
 			fill_random(buf, len);
 			assert(vbd_write(v, buf, len, off) == (ssize_t)len);
 			memcpy(ref + off, buf, len);
@@ -515,6 +521,44 @@ static void test_open_at(void)
  * (test_bad_record). What was appended after the checkpoint is replayed on
  * top of it, and a damaged checkpoint means a full replay.
  */
+/*
+ * Zeroing costs one record for all the whole chunks of a range and hides
+ * the base without fetching it. Zero chunks survive a reopen, by replay
+ * and by checkpoint, and belong to the snapshot they were zeroed before.
+ */
+static void test_zero(void)
+{
+	struct vbd *v = setup(), *view;
+	static uint8_t before[SIZE];
+	struct stat st;
+
+	assert(vbd_zero(v, 0, SIZE) == 0);			/* rec 0: all 256 chunks */
+	assert(stat(log_path, &st) == 0 && st.st_size == SUPER_SIZE + REC);
+	memset(ref, 0, SIZE);
+	check_all(v);
+	assert(vbd_fetched(v) == 0);				/* the base was never needed */
+
+	fill_random(buf, 3 * CHUNK);
+	assert(vbd_write(v, buf, 3 * CHUNK, CHUNK) == 3 * CHUNK);	/* recs 1..3 */
+	memcpy(ref + CHUNK, buf, 3 * CHUNK);
+	memcpy(before, ref, SIZE);
+	assert(vbd_snapshot(v) == 0);				/* snapshot 0: its checkpoint has zero entries */
+	assert(vbd_zero(v, CHUNK + 100, CHUNK) == 0);		/* parts of two chunks, no whole one */
+	memset(ref + CHUNK + 100, 0, CHUNK);
+	assert(vbd_zero(v, 2 * CHUNK + 5, 3 * CHUNK) == 0);	/* a head, two whole chunks, a tail */
+	memset(ref + 2 * CHUNK + 5, 0, 3 * CHUNK);
+	check_all(v);
+	assert(vbd_zero(v, SIZE - CHUNK, 2 * CHUNK) == -EINVAL);
+	assert(vbd_zero(v, SIZE, 0) == 0);
+
+	v = reopen(v);						/* from the checkpoint, then by replay */
+	view = vbd_open_at(log_path, 0);
+	assert(view && vbd_read(view, buf, SIZE, 0) == SIZE && memcmp(buf, before, SIZE) == 0);
+	assert(vbd_zero(view, 0, CHUNK) == -EROFS);
+	vbd_close(view);
+	teardown(v);
+}
+
 /* Wait until @v has fetched @want chunks, give it a moment to overshoot, and check it did not. */
 static void expect_fetched(struct vbd *v, uint64_t want)
 {
@@ -951,6 +995,7 @@ int main(void)
 	RUN(test_snapshot_checkpoint);
 	RUN(test_open_before);
 	RUN(test_fork);
+	RUN(test_zero);
 	RUN(test_prefetch);
 	RUN(test_manifest);
 	RUN(test_one_writer);

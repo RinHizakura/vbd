@@ -119,9 +119,12 @@ static int add_dev(struct srv *s)
 
 static int set_params(struct srv *s)
 {
-	unsigned chunk_shift = __builtin_ctz(vbd_chunk_size(s->v));
+	uint32_t chunk = vbd_chunk_size(s->v);
+	unsigned chunk_shift = __builtin_ctz(chunk);
 	struct ublk_params p = {
-		.len = sizeof(p), .types = UBLK_PARAM_TYPE_BASIC,
+		.len = sizeof(p),
+		.types = UBLK_PARAM_TYPE_BASIC |
+			 (s->readonly ? 0 : UBLK_PARAM_TYPE_DISCARD),
 		.basic = {
 			/* flushes reach us as UBLK_IO_OP_FLUSH */
 			.attrs = UBLK_ATTR_VOLATILE_CACHE |
@@ -132,6 +135,13 @@ static int set_params(struct srv *s)
 			.io_opt_shift = chunk_shift,	/* a chunk is the ideal I/O */
 			.max_sectors = MAX_IO >> 9,
 			.dev_sectors = vbd_size(s->v) >> 9,
+		},
+		/* these carry no data, so MAX_IO does not bound them */
+		.discard = {
+			.discard_granularity = chunk,	/* whole chunks are what is cheap */
+			.max_discard_sectors = UINT32_MAX >> 9,
+			.max_write_zeroes_sectors = UINT32_MAX >> 9,
+			.max_discard_segments = 1,
 		},
 	};
 	struct ublksrv_ctrl_cmd c = { .addr = (uintptr_t)&p, .len = sizeof(p) };
@@ -240,6 +250,9 @@ static int do_io(struct queue *q, unsigned tag)
 		return vbd_write(v, q->buf, len, off);
 	case UBLK_IO_OP_FLUSH:
 		return vbd_flush(v);
+	case UBLK_IO_OP_DISCARD:	/* discarded reads as zeros: more than asked, and one code path */
+	case UBLK_IO_OP_WRITE_ZEROES:
+		return vbd_zero(v, off, len);
 	default:
 		return -EOPNOTSUPP;
 	}

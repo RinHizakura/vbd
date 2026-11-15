@@ -5,6 +5,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,7 +79,10 @@ static int rec_write(struct log *l, const void *hdr, const void *data)
  * The map.
  */
 
-/* Point @chunk at record @rec. 0 or -errno. */
+/* What the map holds for a chunk that is zero: no record to read. */
+#define ZERO_REC	((uint64_t)LONG_MAX)
+
+/* Point @chunk at record @rec, or mark it zero with ZERO_REC. 0 or -errno. */
 static int log_map(struct log *l, uint64_t chunk, uint64_t rec)
 {
 	void *old = xa_store(&l->map, chunk, xa_mk_value(rec), GFP_KERNEL);
@@ -88,6 +92,24 @@ static int log_map(struct log *l, uint64_t chunk, uint64_t rec)
 	if (!old)
 		l->mapped++;
 	return 0;
+}
+
+/*
+ * Enter record @rec, whose header is @h, in the map: the chunk it holds, or
+ * every chunk it says is zero.
+ *
+ * ponytail: one map entry per zeroed chunk, set one by one; a multi-index
+ * entry covering the run if discards of whole devices get slow.
+ */
+static int log_index(struct log *l, const struct rec_hdr *h, uint64_t rec)
+{
+	int ret = 0;
+
+	if (!h->zero_cnt)
+		return log_map(l, h->chunk, rec);
+	for (uint64_t i = 0; i < h->zero_cnt && !ret; i++)
+		ret = log_map(l, h->chunk + i, ZERO_REC);
+	return ret;
 }
 
 /*
@@ -190,7 +212,8 @@ static bool ckpt_read(struct log *l, uint64_t first, uint32_t parts)
 		     h.part == p && h.parts == parts && h.count <= per &&
 		     !rec_read_data(l, first + p, &h, ent);
 		for (uint64_t i = 0; ok && i < h.count; i++)
-			ok = ent[2 * i] < l->nchunks && ent[2 * i + 1] < first &&
+			ok = ent[2 * i] < l->nchunks &&
+			     (ent[2 * i + 1] < first || ent[2 * i + 1] == ZERO_REC) &&
 			     !log_map(l, ent[2 * i], ent[2 * i + 1]);
 	}
 	free(ent);
@@ -346,7 +369,8 @@ static int log_replay(struct log *l)
 			l->ckpt_nrec = l->nrec + 1;	/* someone's checkpoint ends here */
 			continue;
 		}
-		if (h.magic != VBD_MAGIC || h.chunk >= l->nchunks)
+		if (h.magic != VBD_MAGIC || h.chunk >= l->nchunks ||
+		    h.zero_cnt > l->nchunks - h.chunk)
 			break;		/* torn tail */
 		ret = rec_read_data(l, l->nrec, &h, data);
 		if (ret == -EBADMSG) {
@@ -359,7 +383,7 @@ static int log_replay(struct log *l)
 			l->epoch = h.epoch;
 		if (h.epoch > l->upto)
 			continue;	/* written after the snapshot shown */
-		if ((ret = log_map(l, h.chunk, l->nrec)))
+		if ((ret = log_index(l, &h, l->nrec)))
 			goto out;
 	}
 	/*
@@ -466,7 +490,11 @@ uint64_t log_version(const struct log *l, uint64_t chunk)
 {
 	void *e = xa_load((struct xarray *)&l->map, chunk);
 
-	return e ? xa_to_value(e) : LOG_ABSENT;	/* a record number is used once */
+	/*
+	 * A record number is used once. Zero chunks all share one value, which
+	 * is fine: whoever zeroed it and whenever, the content is the same.
+	 */
+	return e ? xa_to_value(e) : LOG_ABSENT;
 }
 
 /* Append @data for @chunk; with @version, only if that is still what the log holds. */
@@ -485,11 +513,32 @@ static int append(struct log *l, uint64_t chunk, const uint8_t *data, const uint
 	ret = rec_write(l, &h, data);
 	/* data is on its way to the file before anyone can find the record */
 	if (!ret)
-		ret = log_map(l, chunk, l->nrec);
+		ret = log_index(l, &h, l->nrec);
 	if (!ret)
 		l->nrec++;
 out:
 	pthread_mutex_unlock(&l->append_lock);
+	return ret;
+}
+
+int log_append_zero(struct log *l, uint64_t chunk, uint64_t count)
+{
+	struct rec_hdr h = { .magic = VBD_MAGIC, .chunk = chunk, .zero_cnt = count };
+	uint8_t *unused = calloc(1, l->chunk_size);	/* every record has data, used or not */
+	int ret;
+
+	if (!unused)
+		return -ENOMEM;
+	rec_seal(l, &h, unused);
+	pthread_mutex_lock(&l->append_lock);
+	h.epoch = l->epoch;
+	ret = rec_write(l, &h, unused);
+	if (!ret)
+		ret = log_index(l, &h, l->nrec);
+	if (!ret)
+		l->nrec++;
+	pthread_mutex_unlock(&l->append_lock);
+	free(unused);
 	return ret;
 }
 
@@ -533,6 +582,10 @@ int log_read(struct log *l, uint64_t chunk, uint8_t *buf, uint32_t within, uint3
 
 	if (!e)
 		return -ENOENT;
+	if (xa_to_value(e) == ZERO_REC) {
+		memset(buf, 0, len);
+		return 0;
+	}
 	return full_pread(l->fd, buf, len, rec_off(l, xa_to_value(e)) + HDR_SIZE + within);
 }
 
